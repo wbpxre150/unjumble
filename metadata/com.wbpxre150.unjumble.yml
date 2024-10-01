@@ -1,0 +1,34 @@
+Categories:
+  - Games
+License: MIT
+AuthorName: Adam Bullock
+AuthorEmail: wbpxre150@outlook.com
+AuthorWebSite: https://unjumble.au
+SourceCode: https://github.com/wbpxre150/unjumble
+IssueTracker: https://github.com/wbpxre150/unjumble/issues
+Changelog: https://github.com/wbpxre150/unjumble/releases
+
+AutoName: unjumble
+
+RepoType: git
+Repo: https://github.com/wbpxre150/unjumble.git
+Binaries: https://github.com/wbpxre150/unjumble/releases/download/unjumble/unjumble.apk
+
+Builds:
+  - versionName: 1.0
+    versionCode: 1
+    commit: v1
+    subdir: app
+    sudo:
+      - apt-get update
+      - apt-get install -y openjdk-17-jdk-headless
+      - update-java-alternatives -a
+    gradle:
+      - yes
+
+AllowedAPKSigningKeys: 480b18292c6be43e3829199c4d6a169b773862144fed576c303f634c4e146ec5
+
+AutoUpdateMode: Version
+UpdateCheckMode: Tags
+CurrentVersion: 1
+CurrentVersionCode: 1
