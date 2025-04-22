@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
-    <item android:color="#2196F3" android:state_enabled="true" /> <!-- Blue when enabled -->
-    <item android:color="#A0A0A0" /> <!-- Gray when disabled -->
+    <item android:color="@color/letter_button_normal" android:state_enabled="true" />
+    <item android:color="@color/letter_button_disabled" />
 </selector>

@@ -26,7 +26,7 @@
         </activity>
         <activity
             android:name=".DownloadActivity"
-            android:theme="@android:style/Theme.NoTitleBar.Fullscreen" />
+            android:theme="@style/Theme.UnjumbleApp" />
     </application>
 
 </manifest>

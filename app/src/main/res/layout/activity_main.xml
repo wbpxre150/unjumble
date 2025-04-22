@@ -3,34 +3,32 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:fillViewport="true">
+    android:fillViewport="true"
+    android:background="@color/dark_background">
 
     <androidx.constraintlayout.widget.ConstraintLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:padding="16dp"
-        android:background="#FFFFFF">
+        android:padding="16dp">
 
         <TextView
             android:id="@+id/titleTextView"
+            style="@style/HeaderText"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:text="Unjumble The Word"
-            android:textSize="24sp"
-            android:textStyle="bold"
             android:gravity="center"
             android:layout_marginBottom="16dp"
-            android:textColor="#333333"
+            android:textColor="@color/header_text"
             app:layout_constraintTop_toTopOf="parent"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent" />
 
         <TextView
             android:id="@+id/levelTextView"
+            style="@style/SubheaderText"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:textSize="12sp"
-            android:textColor="#333333"
             android:gravity="center"
             app:layout_constraintTop_toBottomOf="@id/titleTextView"
             app:layout_constraintStart_toEndOf="@id/scoreTextView"
@@ -38,10 +36,9 @@
 
         <TextView
             android:id="@+id/scoreTextView"
+            style="@style/SubheaderText"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:textSize="12sp"
-            android:textColor="#333333"
             android:gravity="center"
             app:layout_constraintTop_toBottomOf="@id/titleTextView"
             app:layout_constraintStart_toStartOf="parent"
@@ -49,51 +46,90 @@
 
         <TextView
             android:id="@+id/timerTextView"
+            style="@style/SubheaderText"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:textSize="12sp"
-            android:textColor="#333333"
             android:gravity="center"
-            android:layout_marginTop="4dp"
+            android:layout_marginTop="8dp"
             app:layout_constraintTop_toBottomOf="@id/scoreTextView"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent" />
 
-        <ImageView
-            android:id="@+id/imageView"
+        <androidx.cardview.widget.CardView
+            android:id="@+id/imageCardView"
             android:layout_width="0dp"
             android:layout_height="0dp"
-            android:layout_marginTop="16dp"
-            android:scaleType="fitCenter"
+            android:layout_marginTop="24dp"
+            app:cardCornerRadius="16dp"
+            app:cardElevation="8dp"
+            app:cardBackgroundColor="@color/dark_surface"
             app:layout_constraintDimensionRatio="H,4:3"
             app:layout_constraintTop_toBottomOf="@id/timerTextView"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
-            app:layout_constraintWidth_percent="1.1"
-            app:layout_constraintHeight_percent="1.1"/>
+            app:layout_constraintWidth_percent="1.0">
 
-        <TextView
-            android:id="@+id/textBox"
+            <ImageView
+                android:id="@+id/imageView"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:padding="8dp"
+                android:scaleType="fitCenter"/>
+        </androidx.cardview.widget.CardView>
+
+        <LinearLayout
+            android:id="@+id/textBoxContainer"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:background="#F0F0F0"
-            android:padding="8dp"
-            android:textSize="36sp"
-            android:textColor="#333333"
-            android:gravity="center"
-            android:minHeight="40dp"
-            app:layout_constraintTop_toBottomOf="@id/imageView"
+            android:layout_marginTop="24dp"
+            android:orientation="horizontal"
+            app:layout_constraintTop_toBottomOf="@id/imageCardView"
             app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintEnd_toEndOf="parent" />
+            app:layout_constraintEnd_toEndOf="parent">
+
+            <androidx.cardview.widget.CardView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                app:cardCornerRadius="12dp"
+                app:cardElevation="4dp"
+                app:cardBackgroundColor="@color/text_box_background">
+
+                <TextView
+                    android:id="@+id/textBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:padding="16dp"
+                    android:textSize="36sp"
+                    android:textStyle="bold"
+                    android:textAllCaps="true"
+                    android:textColor="@color/dark_text_primary"
+                    android:gravity="center"
+                    android:minHeight="84dp"
+                    android:freezesText="true" />
+            </androidx.cardview.widget.CardView>
+
+            <Button
+                android:id="@+id/backspaceButton"
+                android:layout_width="60dp"
+                android:layout_height="match_parent"
+                android:layout_marginStart="8dp"
+                android:text="←"
+                android:textSize="24sp"
+                android:backgroundTint="@color/button_background_selector"
+                android:textColor="@color/button_text_selector" />
+        </LinearLayout>
 
         <LinearLayout
             android:id="@+id/letterContainer"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="24dp"
             android:orientation="vertical"
-            app:layout_constraintTop_toBottomOf="@id/textBox"
+            android:background="@color/dark_surface"
+            android:padding="12dp"
+            android:elevation="4dp"
+            app:layout_constraintTop_toBottomOf="@id/textBoxContainer"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent" />
 
@@ -101,7 +137,7 @@
             android:id="@+id/buttonContainer"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
+            android:layout_marginTop="24dp"
             android:orientation="horizontal"
             app:layout_constraintTop_toBottomOf="@id/letterContainer"
             app:layout_constraintStart_toStartOf="parent"
@@ -112,16 +148,30 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
+                android:layout_margin="4dp"
+                android:paddingHorizontal="4dp"
+                android:paddingVertical="12dp"
                 android:text="Clear"
+                android:singleLine="true"
+                android:textSize="14sp"
+                android:maxLines="1"
+                android:ellipsize="end"
                 android:backgroundTint="@color/button_background_selector"
                 android:textColor="@color/button_text_selector" />
 
             <Button
-                android:id="@+id/backspaceButton"
+                android:id="@+id/shuffleButton"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="Back"
+                android:layout_margin="4dp"
+                android:paddingHorizontal="4dp"
+                android:paddingVertical="12dp"
+                android:text="Mix"
+                android:singleLine="true"
+                android:textSize="14sp"
+                android:maxLines="1"
+                android:ellipsize="end"
                 android:backgroundTint="@color/button_background_selector"
                 android:textColor="@color/button_text_selector" />
 
@@ -130,7 +180,14 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
+                android:layout_margin="4dp"
+                android:paddingHorizontal="4dp"
+                android:paddingVertical="12dp"
                 android:text="Hint"
+                android:singleLine="true"
+                android:textSize="14sp"
+                android:maxLines="1"
+                android:ellipsize="end"
                 android:backgroundTint="@color/button_background_selector"
                 android:textColor="@color/button_text_selector" />
 
@@ -139,7 +196,14 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
+                android:layout_margin="4dp"
+                android:paddingHorizontal="4dp"
+                android:paddingVertical="12dp"
                 android:text="Check"
+                android:singleLine="true"
+                android:textSize="14sp"
+                android:maxLines="1"
+                android:ellipsize="end"
                 android:backgroundTint="@color/button_background_selector"
                 android:textColor="@color/button_text_selector" />
 
@@ -149,12 +213,13 @@
             android:id="@+id/nextWordButton"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
+            android:layout_marginTop="24dp"
+            android:padding="16dp"
             android:text="Next Word"
             android:textSize="24sp"
             android:visibility="gone"
-            android:backgroundTint="@color/button_background_selector"
-            android:textColor="@color/button_text_selector"
+            android:backgroundTint="@color/secondary"
+            android:textColor="@color/dark_text_primary"
             app:layout_constraintTop_toBottomOf="@id/buttonContainer"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent"

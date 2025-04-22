@@ -25,6 +25,7 @@ class MainActivity : Activity() {
     private lateinit var letterContainer: LinearLayout
     private lateinit var clearButton: Button
     private lateinit var backspaceButton: Button
+    private lateinit var shuffleButton: Button
     private lateinit var nextWordButton: Button
     private lateinit var hintButton: Button
     private lateinit var checkButton: Button
@@ -68,6 +69,7 @@ class MainActivity : Activity() {
         letterContainer = findViewById(R.id.letterContainer)
         clearButton = findViewById(R.id.clearButton)
         backspaceButton = findViewById(R.id.backspaceButton)
+        shuffleButton = findViewById(R.id.shuffleButton)
         nextWordButton = findViewById(R.id.nextWordButton)
         hintButton = findViewById(R.id.hintButton)
         checkButton = findViewById(R.id.checkButton)
@@ -104,6 +106,7 @@ class MainActivity : Activity() {
 
         clearButton.setOnClickListener { clearIncorrectLetters() }
         backspaceButton.setOnClickListener { backspace() }
+        shuffleButton.setOnClickListener { shuffleLetters() }
         nextWordButton.setOnClickListener {
             loadNextPicture()
             saveAppState()
@@ -334,12 +337,28 @@ class MainActivity : Activity() {
             }
 
             val button = Button(this).apply {
-                text = letter.toString()
+                text = letter.toString().uppercase()  // Convert to uppercase for better readability
                 setOnClickListener {
                     if (!isTimerRunning) {
                         startTimer()
                     }
-                    textBox.append(letter.toString())
+                    
+                    // Get the lowercase letter
+                    val letterToAdd = this.text.toString().lowercase()
+                    
+                    // Directly update the TextView
+                    textBox.text = textBox.text.toString() + letterToAdd
+                    
+                    // Add a quick feedback animation to the textBox
+                    try {
+                        val scaleAnim = AnimationUtils.loadAnimation(context, android.R.anim.fade_in)
+                        scaleAnim.duration = 200
+                        textBox.startAnimation(scaleAnim)
+                    } catch (e: Exception) {
+                        // Ignore animation errors to ensure functionality
+                    }
+                    
+                    // Disable this button
                     isEnabled = false
                 }
                 layoutParams = LinearLayout.LayoutParams(buttonWidth, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
@@ -347,7 +366,14 @@ class MainActivity : Activity() {
                 }
                 backgroundTintList = ContextCompat.getColorStateList(context, R.color.letter_button_background_selector)
                 setTextColor(ContextCompat.getColorStateList(context, R.color.button_text_selector))
-                textSize = 18f * 1.5f
+                textSize = 26f  // Slightly larger text
+                elevation = 8f
+                setPadding(0, 24, 0, 24)
+                isAllCaps = true  // Force uppercase for the button text display
+                typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD)  // Bolder font
+                
+                // Create rounded corners for the button
+                stateListAnimator = null  // Remove button shadow animation
             }
 
             currentRow?.addView(button)
@@ -360,28 +386,44 @@ class MainActivity : Activity() {
     }
 
     private fun clearIncorrectLetters() {
+        // Clear the textbox and re-enable all letter buttons
         textBox.text = ""
         enableAllLetterButtons()
-        correctLetters.forEach { letter ->
-            textBox.append(letter.toString())
-            disableLetterButton(letter.toString())
+        
+        // Restore the correct letters that were already found
+        if (correctLetters.isNotEmpty()) {
+            // Set the correct letters in the textbox (they'll display as uppercase due to textAllCaps="true")
+            textBox.text = correctLetters
+            
+            // Disable the corresponding letter buttons
+            correctLetters.forEach { letter ->
+                disableLetterButton(letter.toString())
+            }
         }
+        
+        // Check the word status
         checkWord()
     }
 
     private fun backspace() {
-        val text = textBox.text
+        val text = textBox.text.toString()
         if (text.isNotEmpty() && text.length > correctLetters.length) {
-            val removedLetter = text.last().toString()
+            // Get the last letter (which will be uppercase in the display)
+            val removedLetter = text.last().toString().lowercase()
+            
+            // Remove the last character
             textBox.text = text.substring(0, text.length - 1)
+            
+            // Re-enable the matching button (which will have uppercase text)
             enableFirstDisabledButton(removedLetter)
         }
     }
 
     private fun enableFirstDisabledButton(letter: String) {
+        val uppercaseLetter = letter.uppercase()
         var enabled = false
         forEachLetterButton { button ->
-            if (!enabled && button.text.toString() == letter && !button.isEnabled) {
+            if (!enabled && button.text.toString() == uppercaseLetter && !button.isEnabled) {
                 button.isEnabled = true
                 enabled = true
             }
@@ -395,8 +437,9 @@ class MainActivity : Activity() {
     }
 
     private fun disableLetterButton(letter: String) {
+        val uppercaseLetter = letter.uppercase()
         forEachLetterButton { button ->
-            if (button.text.toString() == letter && button.isEnabled) {
+            if (button.text.toString() == uppercaseLetter && button.isEnabled) {
                 button.isEnabled = false
                 return@forEachLetterButton
             }
@@ -438,13 +481,16 @@ class MainActivity : Activity() {
 
         enableAllLetterButtons()
 
+        // Create a map of lowercase letter counts from correctLetters
         val letterCounts = correctLetters.groupingBy { it }.eachCount().toMutableMap()
-
+        
+        // Now handle the buttons which have uppercase text
         forEachLetterButton { button ->
-            val letter = button.text.toString()[0]
-            if (letter in letterCounts && letterCounts[letter]!! > 0) {
+            // Get the letter from the button but convert to lowercase for comparison
+            val buttonLetter = button.text.toString()[0].lowercaseChar()
+            if (buttonLetter in letterCounts && letterCounts[buttonLetter]!! > 0) {
                 button.isEnabled = false
-                letterCounts[letter] = letterCounts[letter]!! - 1
+                letterCounts[buttonLetter] = letterCounts[buttonLetter]!! - 1
             }
         }
 
@@ -468,5 +514,54 @@ class MainActivity : Activity() {
         hintButton.isEnabled = enabled
         hintButton.backgroundTintList = ContextCompat.getColorStateList(this, R.color.button_background_selector)
         hintButton.setTextColor(ContextCompat.getColorStateList(this, R.color.button_text_selector))
+    }
+    
+    private fun shuffleLetters() {
+        // Start the timer if it's not running
+        if (!isTimerRunning) {
+            startTimer()
+        }
+        
+        try {
+            // Get all letter buttons currently enabled
+            val activeButtons = ArrayList<Button>()
+            val activeLetters = ArrayList<String>()
+            
+            // First pass to collect all buttons and their letters (which will already be uppercase)
+            forEachLetterButton { button ->
+                if (button.isEnabled) {
+                    activeButtons.add(button)
+                    activeLetters.add(button.text.toString())
+                }
+            }
+            
+            // If we don't have at least 2 letters to shuffle, nothing to do
+            if (activeButtons.size < 2) {
+                return
+            }
+            
+            // Shuffle the letters until the order is different
+            var shuffledLetters: List<String>
+            var attempts = 0
+            val maxAttempts = 5
+            do {
+                shuffledLetters = activeLetters.shuffled()
+                attempts++
+            } while (shuffledLetters == activeLetters && attempts < maxAttempts)
+            
+            // If we couldn't get a different order after several attempts, just return
+            if (shuffledLetters == activeLetters) {
+                return
+            }
+            
+            // Update each button with its new letter
+            for (i in activeButtons.indices) {
+                if (i < shuffledLetters.size) {
+                    activeButtons[i].text = shuffledLetters[i]
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Shuffle error: ${e.message}", e)
+        }
     }
 }

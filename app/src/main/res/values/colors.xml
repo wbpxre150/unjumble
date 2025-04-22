@@ -1,5 +1,33 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Base theme colors -->
+    <color name="primary">#3D5AFE</color>
+    <color name="primary_variant">#536DFE</color>
+    <color name="secondary">#00E676</color>
+    <color name="secondary_variant">#00C853</color>
+    <color name="error">#CF6679</color>
+    
+    <!-- Dark theme specific colors -->
+    <color name="dark_background">#121212</color>
+    <color name="dark_surface">#1E1E1E</color>
+    <color name="dark_on_surface">#EEEEEE</color>
+    <color name="dark_text_primary">#FFFFFF</color>
+    <color name="dark_text_secondary">#B0B0B0</color>
+    
+    <!-- Button colors -->
+    <color name="button_normal">#3D5AFE</color>
+    <color name="button_disabled">#424242</color>
+    <color name="letter_button_normal">#00E676</color>
+    <color name="letter_button_disabled">#424242</color>
+    <color name="text_on_button_normal">#FFFFFF</color>
+    <color name="text_on_button_disabled">#808080</color>
+    
+    <!-- Text box and other UI elements -->
+    <color name="text_box_background">#2A2A2A</color>
+    <color name="header_text">#FFFFFF</color>
+    <color name="subheader_text">#B0B0B0</color>
+    
+    <!-- Legacy colors (kept for compatibility) -->
     <color name="purple_200">#FFBB86FC</color>
     <color name="purple_500">#FF6200EE</color>
     <color name="purple_700">#FF3700B3</color>

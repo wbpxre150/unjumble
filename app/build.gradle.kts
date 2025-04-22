@@ -65,6 +65,7 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation ("androidx.constraintlayout:constraintlayout:2.1.4")
+    implementation ("androidx.cardview:cardview:1.0.0")
     implementation ("org.apache.commons:commons-compress:1.21")
     implementation ("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.5.2")
     testImplementation(libs.junit)
