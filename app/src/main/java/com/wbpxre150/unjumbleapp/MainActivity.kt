@@ -291,6 +291,7 @@ class MainActivity : Activity() {
 
         textBox.text = ""
         correctLetters = ""
+        // Hide next word button as we'll auto-progress
         nextWordButton.visibility = View.GONE
         isTimerRunning = false
         updateTimerDisplay()
@@ -502,7 +503,11 @@ class MainActivity : Activity() {
 
         if (correctLetters == currentWord) {
             stopTimer()
-            nextWordButton.visibility = View.VISIBLE
+            // Set a brief delay to show the completed word before automatically moving to next
+            Handler(Looper.getMainLooper()).postDelayed({
+                loadNextPicture()
+                saveAppState()
+            }, 1000) // 1 second delay
             level++
         } else if (!isHint) {
             score -= 1  // Deduct a point for using Check button
