@@ -360,6 +360,12 @@ class MainActivity : Activity() {
                     
                     // Disable this button
                     isEnabled = false
+
+                    //NEW CODE: Check if the word is complete and correct
+                    if (textBox.text.toString() == currentWord) {
+                        // Word is correct, automatically trigger checkWord
+                        checkWord()
+                    }
                 }
                 layoutParams = LinearLayout.LayoutParams(buttonWidth, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                     setMargins(buttonMargin / 2, 0, buttonMargin / 2, buttonMargin)
