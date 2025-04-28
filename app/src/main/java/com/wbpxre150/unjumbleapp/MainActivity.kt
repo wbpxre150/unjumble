@@ -546,11 +546,8 @@ class MainActivity : Activity() {
 
         if (correctLetters == currentWord) {
             stopTimer()
-            // Set a brief delay to show the completed word before automatically moving to next
-            Handler(Looper.getMainLooper()).postDelayed({
-                loadNextPicture()
-                saveAppState()
-            }, 1000) // 1 second delay
+            // Flash the textbox green
+            flashTextBoxGreen()
             level++
         } else if (!isHint) {
             score -= 1  // Deduct a point for using Check button
@@ -577,13 +574,35 @@ class MainActivity : Activity() {
         // Set text box background to red
         textBox.setBackgroundColor(ContextCompat.getColor(this, R.color.error))
         
+        // Deduct a point for incorrect word
+        score -= 1
+        updateScoreAndLevel()
+        
         // Schedule restoration of original color and clearing after 1 second
         Handler(Looper.getMainLooper()).postDelayed({
             // Restore original background
             textBox.background = originalBackground
             
-            // Call clear function
-            clearIncorrectLetters()
+            // Call checkWord instead of clearIncorrectLetters to preserve game flow
+            checkWord(isHint = false)
+        }, 1000) // 1 second delay
+    }
+    
+    private fun flashTextBoxGreen() {
+        // Save original background color
+        val originalBackground = textBox.background
+        
+        // Set text box background to green (using app's secondary color)
+        textBox.setBackgroundColor(ContextCompat.getColor(this, R.color.secondary))
+        
+        // Schedule restoration of original color and move to next picture after 1 second
+        Handler(Looper.getMainLooper()).postDelayed({
+            // Restore original background
+            textBox.background = originalBackground
+            
+            // Move to next picture
+            loadNextPicture()
+            saveAppState()
         }, 1000) // 1 second delay
     }
     
