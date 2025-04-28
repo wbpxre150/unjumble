@@ -311,10 +311,27 @@ class MainActivity : Activity() {
     private fun createLetterButtons() {
         letterContainer.removeAllViews()
         val screenWidth = resources.displayMetrics.widthPixels
-        val buttonMargin = 8
-        val buttonsPerRow = 6
-        val buttonWidth = ((screenWidth - (buttonsPerRow + 1) * buttonMargin) / buttonsPerRow) - 20
-
+        val screenHeight = resources.displayMetrics.heightPixels
+        val density = resources.displayMetrics.density
+        
+        // Determine buttons per row based on screen width
+        // On smaller screens, we'll have fewer buttons per row
+        val buttonsPerRow = when {
+            screenWidth < 480 * density -> 4 // Small phones
+            screenWidth < 600 * density -> 5 // Medium phones
+            else -> 6 // Large phones and tablets
+        }
+        
+        // Calculate button size based on available width
+        val buttonMargin = (4 * density).toInt()
+        val buttonWidth = ((screenWidth - 32 * density) / buttonsPerRow).toInt() - (buttonMargin * 2)
+        
+        // Adjust button height based on screen size to avoid overflow
+        val buttonHeight = (48 * density).toInt()
+        
+        android.util.Log.d("MainActivity", "Screen: ${screenWidth}x${screenHeight}, Density: $density, " +
+            "Buttons per row: $buttonsPerRow, Button size: ${buttonWidth}x${buttonHeight}")
+        
         var currentRow: LinearLayout? = null
         var buttonsInCurrentRow = 0
 
@@ -332,6 +349,7 @@ class MainActivity : Activity() {
                         LinearLayout.LayoutParams.WRAP_CONTENT
                     )
                     setPadding(buttonMargin, buttonMargin, buttonMargin, buttonMargin)
+                    gravity = android.view.Gravity.CENTER_HORIZONTAL
                 }
                 letterContainer.addView(currentRow)
                 buttonsInCurrentRow = 0
@@ -362,22 +380,47 @@ class MainActivity : Activity() {
                     // Disable this button
                     isEnabled = false
 
-                    //NEW CODE: Check if the word is complete and correct
+                    //Check if the word is complete and correct
                     if (textBox.text.toString() == currentWord) {
                         // Word is correct, automatically trigger checkWord
                         checkWord()
+                    } else {
+                        // Check if all letters are used (all buttons disabled)
+                        var allLettersUsed = true
+                        forEachLetterButton { btn ->
+                            if (btn.isEnabled) {
+                                allLettersUsed = false
+                                return@forEachLetterButton
+                            }
+                        }
+                        
+                        // If all letters are used and word is incorrect, flash red and clear
+                        if (allLettersUsed && textBox.text.toString() != currentWord) {
+                            flashTextBoxRed()
+                        }
                     }
                 }
-                layoutParams = LinearLayout.LayoutParams(buttonWidth, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                    setMargins(buttonMargin / 2, 0, buttonMargin / 2, buttonMargin)
+                layoutParams = LinearLayout.LayoutParams(buttonWidth, buttonHeight).apply {
+                    setMargins(buttonMargin, buttonMargin, buttonMargin, buttonMargin)
                 }
                 backgroundTintList = ContextCompat.getColorStateList(context, R.color.letter_button_background_selector)
                 setTextColor(ContextCompat.getColorStateList(context, R.color.button_text_selector))
-                textSize = 26f  // Slightly larger text
-                elevation = 8f
-                setPadding(0, 24, 0, 24)
+                
+                // Adjust text size based on screen density
+                val textSizeSp = when {
+                    density <= 1.0 -> 18f // ldpi
+                    density <= 1.5 -> 20f // mdpi
+                    density <= 2.0 -> 22f // hdpi
+                    else -> 24f           // xhdpi and above
+                }
+                textSize = textSizeSp
+                
+                elevation = 4f
+                setPadding(0, 0, 0, 0)
                 isAllCaps = true  // Force uppercase for the button text display
-                typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD)  // Bolder font
+                typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD)
+                minimumWidth = 0
+                minimumHeight = 0
                 
                 // Create rounded corners for the button
                 stateListAnimator = null  // Remove button shadow animation
@@ -525,6 +568,23 @@ class MainActivity : Activity() {
         hintButton.isEnabled = enabled
         hintButton.backgroundTintList = ContextCompat.getColorStateList(this, R.color.button_background_selector)
         hintButton.setTextColor(ContextCompat.getColorStateList(this, R.color.button_text_selector))
+    }
+    
+    private fun flashTextBoxRed() {
+        // Save original background color
+        val originalBackground = textBox.background
+        
+        // Set text box background to red
+        textBox.setBackgroundColor(ContextCompat.getColor(this, R.color.error))
+        
+        // Schedule restoration of original color and clearing after 1 second
+        Handler(Looper.getMainLooper()).postDelayed({
+            // Restore original background
+            textBox.background = originalBackground
+            
+            // Call clear function
+            clearIncorrectLetters()
+        }, 1000) // 1 second delay
     }
     
     private fun shuffleLetters() {

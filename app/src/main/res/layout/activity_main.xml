@@ -1,15 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:fillViewport="true"
-    android:background="@color/dark_background">
+    android:background="@color/dark_background"
+    android:fadeScrollbars="false"
+    android:scrollbarStyle="outsideOverlay">
 
     <androidx.constraintlayout.widget.ConstraintLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:padding="16dp">
+        android:paddingHorizontal="16dp"
+        android:paddingTop="16dp"
+        android:paddingBottom="32dp"
+        android:clipToPadding="false">
 
         <TextView
             android:id="@+id/titleTextView"
@@ -59,7 +65,7 @@
             android:id="@+id/imageCardView"
             android:layout_width="0dp"
             android:layout_height="0dp"
-            android:layout_marginTop="24dp"
+            android:layout_marginTop="16dp"
             app:cardCornerRadius="16dp"
             app:cardElevation="8dp"
             app:cardBackgroundColor="@color/dark_surface"
@@ -67,13 +73,16 @@
             app:layout_constraintTop_toBottomOf="@id/timerTextView"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
-            app:layout_constraintWidth_percent="1.0">
+            app:layout_constraintWidth_percent="0.9"
+            app:layout_constraintHeight_default="percent"
+            app:layout_constraintHeight_percent="0.3">
 
             <ImageView
                 android:id="@+id/imageView"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:padding="8dp"
+                android:adjustViewBounds="true"
                 android:scaleType="fitCenter"/>
         </androidx.cardview.widget.CardView>
 
@@ -81,7 +90,7 @@
             android:id="@+id/textBoxContainer"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
+            android:layout_marginTop="16dp"
             android:orientation="horizontal"
             app:layout_constraintTop_toBottomOf="@id/imageCardView"
             app:layout_constraintStart_toStartOf="parent"
@@ -99,23 +108,27 @@
                     android:id="@+id/textBox"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:padding="16dp"
-                    android:textSize="36sp"
+                    android:padding="12dp"
+                    android:textSize="28sp"
                     android:textStyle="bold"
                     android:textAllCaps="true"
                     android:textColor="@color/dark_text_primary"
                     android:gravity="center"
-                    android:minHeight="84dp"
-                    android:freezesText="true" />
+                    android:minHeight="64dp"
+                    android:freezesText="true"
+                    android:maxLines="1"
+                    android:ellipsize="end" />
             </androidx.cardview.widget.CardView>
 
             <Button
                 android:id="@+id/backspaceButton"
-                android:layout_width="60dp"
+                android:layout_width="50dp"
                 android:layout_height="match_parent"
-                android:layout_marginStart="8dp"
+                android:layout_marginStart="4dp"
                 android:text="←"
-                android:textSize="24sp"
+                android:textSize="20sp"
+                android:minWidth="0dp"
+                android:paddingHorizontal="0dp"
                 android:backgroundTint="@color/button_background_selector"
                 android:textColor="@color/button_text_selector" />
         </LinearLayout>
@@ -124,11 +137,12 @@
             android:id="@+id/letterContainer"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
+            android:layout_marginTop="16dp"
             android:orientation="vertical"
             android:background="@color/dark_surface"
-            android:padding="12dp"
+            android:padding="8dp"
             android:elevation="4dp"
+            android:minHeight="100dp"
             app:layout_constraintTop_toBottomOf="@id/textBoxContainer"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent" />
@@ -137,8 +151,9 @@
             android:id="@+id/buttonContainer"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
+            android:layout_marginTop="16dp"
             android:orientation="horizontal"
+            android:gravity="center"
             app:layout_constraintTop_toBottomOf="@id/letterContainer"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent">
@@ -148,14 +163,16 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_margin="4dp"
-                android:paddingHorizontal="4dp"
-                android:paddingVertical="12dp"
+                android:layout_margin="2dp"
+                android:paddingHorizontal="2dp"
+                android:paddingVertical="8dp"
                 android:text="Clear"
                 android:singleLine="true"
-                android:textSize="14sp"
+                android:textSize="12sp"
                 android:maxLines="1"
                 android:ellipsize="end"
+                android:minHeight="48dp"
+                android:minWidth="0dp"
                 android:backgroundTint="@color/button_background_selector"
                 android:textColor="@color/button_text_selector" />
 
@@ -164,14 +181,16 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_margin="4dp"
-                android:paddingHorizontal="4dp"
-                android:paddingVertical="12dp"
+                android:layout_margin="2dp"
+                android:paddingHorizontal="2dp"
+                android:paddingVertical="8dp"
                 android:text="Mix"
                 android:singleLine="true"
-                android:textSize="14sp"
+                android:textSize="12sp"
                 android:maxLines="1"
                 android:ellipsize="end"
+                android:minHeight="48dp"
+                android:minWidth="0dp"
                 android:backgroundTint="@color/button_background_selector"
                 android:textColor="@color/button_text_selector" />
 
@@ -180,14 +199,16 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_margin="4dp"
-                android:paddingHorizontal="4dp"
-                android:paddingVertical="12dp"
+                android:layout_margin="2dp"
+                android:paddingHorizontal="2dp"
+                android:paddingVertical="8dp"
                 android:text="Hint"
                 android:singleLine="true"
-                android:textSize="14sp"
+                android:textSize="12sp"
                 android:maxLines="1"
                 android:ellipsize="end"
+                android:minHeight="48dp"
+                android:minWidth="0dp"
                 android:backgroundTint="@color/button_background_selector"
                 android:textColor="@color/button_text_selector" />
 
@@ -196,14 +217,16 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_margin="4dp"
-                android:paddingHorizontal="4dp"
-                android:paddingVertical="12dp"
+                android:layout_margin="2dp"
+                android:paddingHorizontal="2dp"
+                android:paddingVertical="8dp"
                 android:text="Check"
                 android:singleLine="true"
-                android:textSize="14sp"
+                android:textSize="12sp"
                 android:maxLines="1"
                 android:ellipsize="end"
+                android:minHeight="48dp"
+                android:minWidth="0dp"
                 android:backgroundTint="@color/button_background_selector"
                 android:textColor="@color/button_text_selector" />
 
