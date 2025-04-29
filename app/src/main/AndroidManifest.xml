@@ -27,6 +27,9 @@
         <activity
             android:name=".DownloadActivity"
             android:theme="@style/Theme.UnjumbleApp" />
+        <activity
+            android:name=".EndGameActivity"
+            android:theme="@style/Theme.UnjumbleApp" />
     </application>
 
 </manifest>

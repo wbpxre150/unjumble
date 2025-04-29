@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true"
+    android:background="@color/dark_background"
+    android:fadeScrollbars="false"
+    android:scrollbarStyle="outsideOverlay">
+
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingHorizontal="16dp"
+        android:paddingTop="16dp"
+        android:paddingBottom="32dp"
+        android:clipToPadding="false">
+
+        <TextView
+            android:id="@+id/congratulationsTitleTextView"
+            style="@style/HeaderText"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:text="Congratulations!"
+            android:gravity="center"
+            android:layout_marginBottom="16dp"
+            android:textColor="@color/header_text"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent" />
+
+        <TextView
+            android:id="@+id/completionTextView"
+            style="@style/SubheaderText"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:text="You've completed all the levels!"
+            android:gravity="center"
+            android:layout_marginBottom="24dp"
+            android:textSize="18sp"
+            app:layout_constraintTop_toBottomOf="@id/congratulationsTitleTextView"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent" />
+
+        <androidx.cardview.widget.CardView
+            android:id="@+id/statsCardView"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            app:cardCornerRadius="16dp"
+            app:cardElevation="8dp"
+            app:cardBackgroundColor="@color/dark_surface"
+            app:layout_constraintTop_toBottomOf="@id/completionTextView"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Your Stats"
+                    android:textSize="22sp"
+                    android:textStyle="bold"
+                    android:textColor="@color/secondary"
+                    android:gravity="center"
+                    android:layout_marginBottom="16dp" />
+
+                <TextView
+                    android:id="@+id/scoreTextView"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Score: 0/0 (0%)"
+                    android:textSize="18sp"
+                    android:textColor="@color/dark_on_surface"
+                    android:layout_marginBottom="8dp" />
+
+                <TextView
+                    android:id="@+id/levelsCompletedTextView"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Levels Completed: 0/0 (0%)"
+                    android:textSize="18sp"
+                    android:textColor="@color/dark_on_surface"
+                    android:layout_marginBottom="8dp" />
+
+                <TextView
+                    android:id="@+id/totalTimeTextView"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Total Play Time: 00:00:00"
+                    android:textSize="18sp"
+                    android:textColor="@color/dark_on_surface" />
+            </LinearLayout>
+        </androidx.cardview.widget.CardView>
+
+        <Button
+            android:id="@+id/playAgainButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="32dp"
+            android:padding="16dp"
+            android:text="Play Again"
+            android:textSize="20sp"
+            android:backgroundTint="@color/secondary"
+            android:textColor="@color/dark_text_primary"
+            app:layout_constraintTop_toBottomOf="@id/statsCardView"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintWidth_percent="0.7" />
+
+        <Button
+            android:id="@+id/shareResultsButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:padding="16dp"
+            android:text="Share Results"
+            android:textSize="20sp"
+            android:backgroundTint="@color/primary"
+            android:textColor="@color/dark_text_primary"
+            app:layout_constraintTop_toBottomOf="@id/playAgainButton"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintWidth_percent="0.7" />
+
+    </androidx.constraintlayout.widget.ConstraintLayout>
+</ScrollView>

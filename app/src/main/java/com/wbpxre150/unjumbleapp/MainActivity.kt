@@ -113,6 +113,12 @@ class MainActivity : Activity() {
         }
         hintButton.setOnClickListener { showHint() }
         checkButton.setOnClickListener { checkWord() }
+        
+        // Debug: Long press on the title to launch end game screen (for testing)
+        findViewById<TextView>(R.id.titleTextView).setOnLongClickListener {
+            launchEndGameScreen()
+            true
+        }
     }
 
     private fun getPicturesDir(): File {
@@ -302,10 +308,37 @@ class MainActivity : Activity() {
 
     private fun loadNextPicture() {
         currentPictureIndex++
+        
+        // Check if we've completed all levels
+        if (level >= totalLevels) {
+            launchEndGameScreen()
+            return
+        }
+        
         if (currentPictureIndex >= pictureFiles.size) {
             currentPictureIndex = 0
         }
         loadCurrentPicture()
+    }
+    
+    private fun launchEndGameScreen() {
+        // Stop timer if running
+        if (isTimerRunning) {
+            stopTimer()
+            savePlayTime()
+        }
+        
+        // Create intent and pass all stats
+        val intent = Intent(this, EndGameActivity::class.java).apply {
+            putExtra("score", score)
+            putExtra("possibleScore", possibleScore)
+            putExtra("levels", level)
+            putExtra("totalLevels", totalLevels)
+            putExtra("totalPlayTimeMillis", totalPlayTimeMillis)
+        }
+        
+        startActivity(intent)
+        finish()
     }
 
     private fun createLetterButtons() {
