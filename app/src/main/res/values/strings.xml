@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">UnjumbleApp</string>
+    <string name="pictures_magnet_link" formatted="false">magnet:?xt=urn:btih:PLACEHOLDER_HASH&amp;dn=pictures.tar.gz&amp;tr=udp%3A//tracker.example.com%3A8080/announce</string>
 </resources>

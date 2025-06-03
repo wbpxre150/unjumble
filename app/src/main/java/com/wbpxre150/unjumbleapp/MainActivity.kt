@@ -31,6 +31,7 @@ class MainActivity : Activity() {
     private lateinit var checkButton: Button
     private lateinit var scoreTextView: TextView
     private lateinit var levelTextView: TextView
+    private lateinit var peerCountTextView: TextView
 
     private var currentPictureIndex = 0
     private lateinit var pictureFiles: List<String>
@@ -49,6 +50,10 @@ class MainActivity : Activity() {
     private var timerHandler: Handler = Handler(Looper.getMainLooper())
     private var timerRunnable: Runnable? = null
     private var isTimerRunning = false
+    
+    private lateinit var torrentManager: TorrentManager
+    private var peerUpdateHandler: Handler = Handler(Looper.getMainLooper())
+    private var peerUpdateRunnable: Runnable? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -76,6 +81,7 @@ class MainActivity : Activity() {
         scoreTextView = findViewById(R.id.scoreTextView)
         levelTextView = findViewById(R.id.levelTextView)
         timerTextView = findViewById(R.id.timerTextView)
+        peerCountTextView = findViewById(R.id.peerCountTextView)
 
         pictureFiles = getPictureFiles()
         if (pictureFiles.isEmpty()) {
@@ -100,9 +106,12 @@ class MainActivity : Activity() {
         possibleScore = sharedPreferences.getInt("possibleScore", 0)
         level = sharedPreferences.getInt("level", 1)
         totalPlayTimeMillis = sharedPreferences.getLong("totalPlayTimeMillis", 0)
+        
+        torrentManager = TorrentManager.getInstance(this)
 
         updateScoreAndLevel()
         loadCurrentPicture()
+        startPeerCountUpdates()
 
         clearButton.setOnClickListener { clearIncorrectLetters() }
         backspaceButton.setOnClickListener { backspace() }
@@ -131,6 +140,7 @@ class MainActivity : Activity() {
             stopTimer()
             savePlayTime()
         }
+        stopPeerCountUpdates()
     }
 
     override fun onResume() {
@@ -139,6 +149,7 @@ class MainActivity : Activity() {
             startTimer()
         }
         updateTimerDisplay()
+        startPeerCountUpdates()
     }
 
     private fun startTimer() {
@@ -685,6 +696,40 @@ class MainActivity : Activity() {
             }
         } catch (e: Exception) {
             android.util.Log.e("MainActivity", "Shuffle error: ${e.message}", e)
+        }
+    }
+    
+    private fun startPeerCountUpdates() {
+        peerUpdateRunnable = object : Runnable {
+            override fun run() {
+                updatePeerCount()
+                peerUpdateHandler.postDelayed(this, 5000) // Update every 5 seconds
+            }
+        }
+        peerUpdateHandler.post(peerUpdateRunnable!!)
+    }
+    
+    private fun stopPeerCountUpdates() {
+        peerUpdateRunnable?.let { peerUpdateHandler.removeCallbacks(it) }
+    }
+    
+    private fun updatePeerCount() {
+        val peerCount = torrentManager.getPeerCount()
+        val isSeeding = torrentManager.isSeeding()
+        val uploadRate = torrentManager.getUploadRate()
+        val isLibraryLoaded = torrentManager.isLibraryLoaded()
+        
+        if (isSeeding && peerCount > 0) {
+            val uploadKB = uploadRate / 1024
+            val mode = if (isLibraryLoaded) "P2P" else "Simulated"
+            peerCountTextView.text = "Sharing with $peerCount peers (${uploadKB}KB/s) [$mode]"
+            peerCountTextView.visibility = View.VISIBLE
+        } else if (isSeeding) {
+            val mode = if (isLibraryLoaded) "P2P" else "Simulated"
+            peerCountTextView.text = "Seeding (0 peers) [$mode]"
+            peerCountTextView.visibility = View.VISIBLE
+        } else {
+            peerCountTextView.visibility = View.GONE
         }
     }
 }

@@ -13,11 +13,13 @@ import java.util.zip.GZIPInputStream
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import kotlin.math.roundToInt
 
-class DownloadActivity : Activity() {
+class DownloadActivity : Activity(), TorrentDownloadListener {
 
     private lateinit var progressBar: ProgressBar
     private lateinit var statusTextView: TextView
     private lateinit var timeRemainingTextView: TextView
+    private lateinit var torrentManager: TorrentManager
+    private var isP2PAttemptFinished = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -26,16 +28,75 @@ class DownloadActivity : Activity() {
         progressBar = findViewById(R.id.progressBar)
         statusTextView = findViewById(R.id.statusTextView)
         timeRemainingTextView = findViewById(R.id.timeRemainingTextView)
+        torrentManager = TorrentManager.getInstance(this)
 
         GlobalScope.launch(Dispatchers.Main) {
             try {
-                downloadAndExtractFiles()
+                startP2PDownload()
             } catch (e: Exception) {
                 e.printStackTrace()
                 statusTextView.text = "Error: ${e.message}"
                 android.util.Log.e("DownloadActivity", "Error during download/extraction", e)
             }
         }
+    }
+
+    private fun startP2PDownload() {
+        statusTextView.text = "Connecting to peers..."
+        timeRemainingTextView.text = "Attempting P2P download..."
+        
+        val magnetLink = getString(R.string.pictures_magnet_link)
+        val downloadPath = File(cacheDir, "pictures.tar.gz").absolutePath
+        
+        torrentManager.downloadFile(magnetLink, downloadPath, this)
+    }
+
+    // TorrentDownloadListener implementation
+    override fun onProgress(downloaded: Long, total: Long, downloadRate: Int, peers: Int) {
+        val progress = if (total > 0) (downloaded.toFloat() / total * 100).toInt() else 0
+        progressBar.progress = progress
+        
+        val downloadSpeedKB = downloadRate / 1024
+        val remainingBytes = total - downloaded
+        val estimatedSeconds = if (downloadRate > 0) (remainingBytes / downloadRate).toInt() else 0
+        
+        statusTextView.text = "P2P Download: $progress% ($peers peers)"
+        timeRemainingTextView.text = "Speed: ${downloadSpeedKB}KB/s | ETA: ${formatTime(estimatedSeconds)}"
+    }
+
+    override fun onCompleted(filePath: String) {
+        isP2PAttemptFinished = true
+        GlobalScope.launch(Dispatchers.Main) {
+            try {
+                extractFiles(File(filePath))
+                torrentManager.seedFile(filePath)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                statusTextView.text = "Error extracting files: ${e.message}"
+            }
+        }
+    }
+
+    override fun onError(error: String) {
+        isP2PAttemptFinished = true
+        android.util.Log.w("DownloadActivity", "P2P download failed: $error")
+        GlobalScope.launch(Dispatchers.Main) {
+            fallbackToHttpsDownload()
+        }
+    }
+
+    override fun onTimeout() {
+        isP2PAttemptFinished = true
+        android.util.Log.w("DownloadActivity", "P2P download timed out")
+        GlobalScope.launch(Dispatchers.Main) {
+            fallbackToHttpsDownload()
+        }
+    }
+
+    private suspend fun fallbackToHttpsDownload() {
+        statusTextView.text = "P2P unavailable, downloading directly..."
+        timeRemainingTextView.text = "Switching to HTTPS download..."
+        downloadAndExtractFiles()
     }
 
     private suspend fun downloadAndExtractFiles() {
@@ -80,12 +141,18 @@ class DownloadActivity : Activity() {
             outputStream.close()
             inputStream.close()
 
+            extractFiles(outputFile)
+        }
+    }
+
+    private suspend fun extractFiles(archiveFile: File) {
+        withContext(Dispatchers.IO) {
             withContext(Dispatchers.Main) {
                 statusTextView.text = "Extracting files..."
                 timeRemainingTextView.text = ""
             }
 
-            val tarInputStream = TarArchiveInputStream(GZIPInputStream(outputFile.inputStream()))
+            val tarInputStream = TarArchiveInputStream(GZIPInputStream(archiveFile.inputStream()))
             val picturesDir = File(filesDir, "pictures")
             picturesDir.mkdirs()
 
@@ -96,7 +163,7 @@ class DownloadActivity : Activity() {
                 if (entry.isDirectory) {
                     file.mkdirs()
                 } else {
-                    file.parentFile?.mkdirs()  // Ensure parent directories exist
+                    file.parentFile?.mkdirs()
                     val fileOutputStream = FileOutputStream(file)
                     tarInputStream.copyTo(fileOutputStream)
                     fileOutputStream.close()
@@ -106,16 +173,14 @@ class DownloadActivity : Activity() {
             }
             tarInputStream.close()
 
-            outputFile.delete()
+            archiveFile.delete()
 
             withContext(Dispatchers.Main) {
                 statusTextView.text = "Extraction complete. $filesExtracted files extracted."
             }
 
-            // Log the number of files extracted and their location
             android.util.Log.d("DownloadActivity", "$filesExtracted files extracted to ${picturesDir.absolutePath}")
 
-            // List the extracted files
             picturesDir.listFiles()?.forEach {
                 android.util.Log.d("DownloadActivity", "Extracted file: ${it.name}")
             }
@@ -123,7 +188,6 @@ class DownloadActivity : Activity() {
 
         getSharedPreferences("AppState", MODE_PRIVATE).edit().putBoolean("filesDownloaded", true).apply()
 
-        // Delay to show the extraction complete message
         delay(2000)
 
         startActivity(Intent(this, MainActivity::class.java))
