@@ -20,11 +20,12 @@ class TorrentManager private constructor(private val context: Context) {
     private var currentTorrentHandle: TorrentHandle? = null
     private var progressMonitorThread: Thread? = null
     private var currentDownloadPath: String = ""
+    private var zeroPeerStartTime: Long = 0
+    private var hasHadPeers = false
     
     companion object {
         private const val TAG = "TorrentManager"
-        private const val DOWNLOAD_TIMEOUT_MS = 180000L // 3 minutes
-        private const val PEER_DISCOVERY_TIMEOUT_MS = 120000L // 2 minutes for peer discovery
+        private const val ZERO_PEER_TIMEOUT_MS = 180000L // 3 minutes with zero peers before fallback
         
         @Volatile
         private var INSTANCE: TorrentManager? = null
@@ -84,15 +85,9 @@ class TorrentManager private constructor(private val context: Context) {
         isDownloading = true
         currentDownloadPath = downloadPath
         
-        // Set a timeout for the entire P2P attempt (including initialization)
-        timeoutRunnable = Runnable {
-            if (isDownloading) {
-                Log.d(TAG, "P2P download timeout (including initialization), falling back to HTTPS")
-                stopDownload()
-                listener.onTimeout()
-            }
-        }
-        handler.postDelayed(timeoutRunnable!!, DOWNLOAD_TIMEOUT_MS)
+        // Initialize zero-peer tracking
+        zeroPeerStartTime = System.currentTimeMillis()
+        hasHadPeers = false
         
         // LibTorrent4j should already be initialized in init block
         continueDownloadAfterInit(magnetLink, downloadPath, listener)
@@ -151,7 +146,6 @@ class TorrentManager private constructor(private val context: Context) {
     private fun startMetadataAndPeerMonitoring(listener: TorrentDownloadListener) {
         progressMonitorThread = Thread {
             var hasMetadata = false
-            var startTime = System.currentTimeMillis()
             
             while (isDownloading && currentTorrentHandle != null && currentTorrentHandle!!.isValid) {
                 try {
@@ -160,6 +154,11 @@ class TorrentManager private constructor(private val context: Context) {
                     val hasMetadataFlag = status.hasMetadata()
                     
                     Log.d(TAG, "Status: peers=$numPeers, hasMetadata=$hasMetadataFlag, state=${status.state()}")
+                    
+                    // Check zero-peer timeout
+                    if (checkZeroPeerTimeout(numPeers, listener)) {
+                        break
+                    }
                     
                     // Check if we got metadata
                     if (!hasMetadata && hasMetadataFlag) {
@@ -179,16 +178,6 @@ class TorrentManager private constructor(private val context: Context) {
                     // Update progress even without metadata to show peer discovery
                     handler.post {
                         listener.onProgress(0, 100, 0, numPeers)
-                    }
-                    
-                    // Give up after too long without any peers or metadata
-                    val elapsed = System.currentTimeMillis() - startTime
-                    if (elapsed > PEER_DISCOVERY_TIMEOUT_MS && numPeers == 0) {
-                        Log.d(TAG, "No peers found after timeout, giving up")
-                        handler.post {
-                            listener.onTimeout()
-                        }
-                        break
                     }
                     
                     Thread.sleep(2000) // Check every 2 seconds for metadata/peers
@@ -217,6 +206,11 @@ class TorrentManager private constructor(private val context: Context) {
                     val totalWantedDone = status.totalWantedDone()
                     val downloadRate = status.downloadRate()
                     val numPeers = status.numPeers()
+                    
+                    // Check zero-peer timeout
+                    if (checkZeroPeerTimeout(numPeers, downloadListener!!)) {
+                        break
+                    }
                     
                     // Check if download is complete
                     if (status.isFinished || (totalWanted > 0 && totalWantedDone >= totalWanted)) {
@@ -255,11 +249,42 @@ class TorrentManager private constructor(private val context: Context) {
         progressMonitorThread?.start()
     }
     
+    private fun checkZeroPeerTimeout(numPeers: Int, listener: TorrentDownloadListener): Boolean {
+        val currentTime = System.currentTimeMillis()
+        
+        if (numPeers > 0) {
+            // We have peers - reset the zero-peer timer
+            hasHadPeers = true
+            zeroPeerStartTime = currentTime
+            return false
+        }
+        
+        // No peers currently
+        val zeroPeerDuration = currentTime - zeroPeerStartTime
+        
+        // If we've had peers before but now have zero, and it's been too long, timeout
+        // OR if we've never had peers and it's been too long, timeout
+        if (zeroPeerDuration > ZERO_PEER_TIMEOUT_MS) {
+            Log.d(TAG, "Zero peers for ${zeroPeerDuration}ms, falling back to HTTPS")
+            handler.post {
+                listener.onTimeout()
+            }
+            isDownloading = false
+            return true
+        }
+        
+        return false
+    }
+    
     fun stopDownload() {
         isDownloading = false
         timeoutRunnable?.let { handler.removeCallbacks(it) }
         progressMonitorThread?.interrupt()
         progressMonitorThread = null
+        
+        // Reset zero-peer tracking
+        zeroPeerStartTime = 0
+        hasHadPeers = false
         
         // Remove torrent from session if it exists
         currentTorrentHandle?.let { handle ->
