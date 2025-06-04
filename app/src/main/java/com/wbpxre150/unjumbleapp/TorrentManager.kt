@@ -37,6 +37,7 @@ class TorrentManager private constructor(private val context: Context) {
     }
     
     init {
+        // Initialize LibTorrent4j immediately when TorrentManager singleton is created
         initializeSession()
     }
     
@@ -83,15 +84,25 @@ class TorrentManager private constructor(private val context: Context) {
         isDownloading = true
         currentDownloadPath = downloadPath
         
-        if (!isLibraryAvailable || sessionManager == null) {
-            Log.d(TAG, "LibTorrent not available - falling back to HTTPS")
-            timeoutRunnable = Runnable {
-                if (isDownloading) {
-                    stopDownload()
-                    listener.onTimeout()
-                }
+        // Set a timeout for the entire P2P attempt (including initialization)
+        timeoutRunnable = Runnable {
+            if (isDownloading) {
+                Log.d(TAG, "P2P download timeout (including initialization), falling back to HTTPS")
+                stopDownload()
+                listener.onTimeout()
             }
-            handler.postDelayed(timeoutRunnable!!, PEER_DISCOVERY_TIMEOUT_MS) // 2 minutes for fallback discovery
+        }
+        handler.postDelayed(timeoutRunnable!!, DOWNLOAD_TIMEOUT_MS)
+        
+        // LibTorrent4j should already be initialized in init block
+        continueDownloadAfterInit(magnetLink, downloadPath, listener)
+    }
+    
+    private fun continueDownloadAfterInit(magnetLink: String, downloadPath: String, listener: TorrentDownloadListener) {
+        if (!isLibraryAvailable || sessionManager == null) {
+            Log.d(TAG, "LibTorrent not available - immediately falling back to HTTPS")
+            isDownloading = false
+            listener.onTimeout()
             return
         }
         
@@ -128,15 +139,7 @@ class TorrentManager private constructor(private val context: Context) {
             // Start monitoring for metadata and peer discovery
             startMetadataAndPeerMonitoring(listener)
             
-            // Set timeout for P2P download
-            timeoutRunnable = Runnable {
-                if (isDownloading) {
-                    Log.d(TAG, "P2P download timeout, falling back to HTTPS")
-                    stopDownload()
-                    listener.onTimeout()
-                }
-            }
-            handler.postDelayed(timeoutRunnable!!, DOWNLOAD_TIMEOUT_MS)
+            // Timeout is already set in downloadFile(), no need to set it again here
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start P2P download", e)

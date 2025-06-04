@@ -23,6 +23,16 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // Check if files are already downloaded
+        val sharedPreferences = getSharedPreferences("AppState", MODE_PRIVATE)
+        if (sharedPreferences.getBoolean("filesDownloaded", false)) {
+            // Files already exist, proceed directly to MainActivity
+            startActivity(Intent(this, MainActivity::class.java))
+            finish()
+            return
+        }
+
         setContentView(R.layout.activity_download)
 
         progressBar = findViewById(R.id.progressBar)

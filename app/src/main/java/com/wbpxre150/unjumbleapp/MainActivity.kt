@@ -51,7 +51,7 @@ class MainActivity : Activity() {
     private var timerRunnable: Runnable? = null
     private var isTimerRunning = false
     
-    private lateinit var torrentManager: TorrentManager
+    private var torrentManager: TorrentManager? = null
     private var peerUpdateHandler: Handler = Handler(Looper.getMainLooper())
     private var peerUpdateRunnable: Runnable? = null
 
@@ -59,13 +59,6 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
 
         sharedPreferences = getSharedPreferences("AppState", Context.MODE_PRIVATE)
-
-        // Check if files have been downloaded
-        if (!sharedPreferences.getBoolean("filesDownloaded", false)) {
-            startActivity(Intent(this, DownloadActivity::class.java))
-            finish()
-            return
-        }
 
         setContentView(R.layout.activity_main)
 
@@ -107,8 +100,15 @@ class MainActivity : Activity() {
         level = sharedPreferences.getInt("level", 1)
         totalPlayTimeMillis = sharedPreferences.getLong("totalPlayTimeMillis", 0)
         
+        // Initialize TorrentManager for seeding (after UI is set up)
         torrentManager = TorrentManager.getInstance(this)
-
+        
+        // Start seeding if files are already downloaded
+        val downloadedFile = File(cacheDir, "pictures.tar.gz")
+        if (downloadedFile.exists()) {
+            torrentManager!!.seedFile(downloadedFile.absolutePath)
+        }
+        
         updateScoreAndLevel()
         loadCurrentPicture()
         startPeerCountUpdates()
@@ -715,11 +715,18 @@ class MainActivity : Activity() {
     
     private fun updatePeerCount() {
         try {
-            val peerCount = torrentManager.getPeerCount()
-            val isSeeding = torrentManager.isSeeding()
-            val uploadRate = torrentManager.getUploadRate()
-            val isLibraryLoaded = torrentManager.isLibraryLoaded()
-            val isSeedingEnabled = torrentManager.isSeedingEnabled()
+            // TorrentManager should already be initialized in onCreate
+            if (torrentManager == null) {
+                android.util.Log.w("MainActivity", "TorrentManager not initialized")
+                peerCountTextView.text = "Torrent: Not initialized"
+                return
+            }
+            
+            val peerCount = torrentManager!!.getPeerCount()
+            val isSeeding = torrentManager!!.isSeeding()
+            val uploadRate = torrentManager!!.getUploadRate()
+            val isLibraryLoaded = torrentManager!!.isLibraryLoaded()
+            val isSeedingEnabled = torrentManager!!.isSeedingEnabled()
             
             android.util.Log.d("MainActivity", "Torrent status - seeding: $isSeeding, peers: $peerCount, uploadRate: $uploadRate, libraryLoaded: $isLibraryLoaded, seedingEnabled: $isSeedingEnabled")
             
