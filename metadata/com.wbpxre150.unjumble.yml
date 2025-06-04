@@ -36,9 +36,9 @@ Builds:
       - update-java-alternatives -a
     gradle:
       - yes
-  - versionName: 3
-    versionCode: 3
-    commit: v3
+  - versionName: 4
+    versionCode: 4
+    commit: v4
     subdir: app
     sudo:
       - apt-get update
