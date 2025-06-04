@@ -319,10 +319,82 @@ class TorrentManager private constructor(private val context: Context) {
                 }
             }
             
-            Log.w(TAG, "No valid torrent handle found - cannot seed standalone file without original magnet/torrent")
+            // No valid handle found - try to restore from stored magnet link
+            Log.d(TAG, "No valid torrent handle found - attempting to restore from stored magnet link")
+            restoreSeedingFromMagnetLink(filePath)
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start seeding", e)
+            isSeeding = false
+        }
+    }
+    
+    fun restoreSeedingFromMagnetLink(filePath: String) {
+        Log.d(TAG, "restoreSeedingFromMagnetLink() called with: $filePath")
+        
+        if (!shouldSeed()) {
+            Log.d(TAG, "Seeding disabled by user preference")
+            return
+        }
+        
+        if (!isLibraryAvailable || sessionManager == null) {
+            Log.d(TAG, "LibTorrent not available for seeding restoration")
+            return
+        }
+        
+        val prefs = context.getSharedPreferences("torrent_prefs", Context.MODE_PRIVATE)
+        val magnetLink = prefs.getString("magnet_link", null)
+        
+        if (magnetLink == null) {
+            Log.w(TAG, "No stored magnet link found - cannot restore seeding")
+            return
+        }
+        
+        if (!File(filePath).exists()) {
+            Log.e(TAG, "File does not exist for seeding: $filePath")
+            return
+        }
+        
+        try {
+            val downloadDir = File(filePath).parentFile
+            Log.d(TAG, "Restoring seeding using magnet link: $magnetLink")
+            
+            // Fetch magnet metadata and add torrent for seeding
+            val data = sessionManager?.fetchMagnet(magnetLink, 30, downloadDir ?: File(filePath).parentFile ?: File("."))
+            
+            if (data != null) {
+                val torrentInfo = TorrentInfo.bdecode(data)
+                
+                // Add torrent to session for seeding (file should already exist)
+                sessionManager?.download(torrentInfo, downloadDir ?: File(filePath).parentFile ?: File("."))
+                currentTorrentHandle = sessionManager?.find(torrentInfo.infoHash())
+                
+                currentTorrentHandle?.let { handle ->
+                    if (handle.isValid) {
+                        // Check if file is already complete
+                        val status = handle.status()
+                        Log.d(TAG, "Restored torrent status: state=${status.state()}, finished=${status.isFinished}")
+                        
+                        if (status.isFinished || status.totalWanted() == status.totalWantedDone()) {
+                            isSeeding = true
+                            Log.d(TAG, "Successfully restored seeding - torrent complete")
+                        } else {
+                            isSeeding = true
+                            Log.d(TAG, "Torrent handle restored - will seed when complete")
+                        }
+                    } else {
+                        Log.w(TAG, "Restored torrent handle is invalid")
+                        currentTorrentHandle = null
+                    }
+                } ?: run {
+                    Log.e(TAG, "Failed to get torrent handle after restoration")
+                }
+            } else {
+                Log.e(TAG, "Failed to fetch magnet metadata for seeding restoration")
+            }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to restore seeding from magnet link", e)
             isSeeding = false
         }
     }

@@ -106,6 +106,7 @@ class MainActivity : Activity() {
         // Start seeding if files are already downloaded
         val downloadedFile = File(cacheDir, "pictures.tar.gz")
         if (downloadedFile.exists()) {
+            // Use the enhanced seedFile method that can restore from stored magnet link
             torrentManager!!.seedFile(downloadedFile.absolutePath)
         }
         

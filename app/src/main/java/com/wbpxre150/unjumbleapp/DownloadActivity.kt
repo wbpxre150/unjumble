@@ -58,6 +58,10 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         val magnetLink = getString(R.string.pictures_magnet_link)
         val downloadPath = File(cacheDir, "pictures.tar.gz").absolutePath
         
+        // Store magnet link for future seeding sessions
+        val prefs = getSharedPreferences("torrent_prefs", MODE_PRIVATE)
+        prefs.edit().putString("magnet_link", magnetLink).apply()
+        
         torrentManager.downloadFile(magnetLink, downloadPath, this)
     }
 
