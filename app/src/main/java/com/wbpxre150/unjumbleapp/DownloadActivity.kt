@@ -188,22 +188,12 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
             }
             tarInputStream.close()
 
-            // Only delete the archive file if seeding is disabled
-            val shouldDeleteArchive = !torrentManager.isSeedingEnabled()
-            if (shouldDeleteArchive) {
-                archiveFile.delete()
-                android.util.Log.d("DownloadActivity", "Archive deleted (seeding disabled)")
-            } else {
-                android.util.Log.d("DownloadActivity", "Archive kept for seeding")
-            }
+            // Always keep the archive file for potential seeding
+            // This ensures the file is available for seeding even after app updates
+            android.util.Log.d("DownloadActivity", "Archive kept for seeding")
 
             withContext(Dispatchers.Main) {
-                val statusMsg = if (shouldDeleteArchive) {
-                    "Extraction complete. $filesExtracted files extracted."
-                } else {
-                    "Extraction complete. $filesExtracted files extracted. File kept for seeding."
-                }
-                statusTextView.text = statusMsg
+                statusTextView.text = "Extraction complete. $filesExtracted files extracted. File kept for seeding."
             }
 
             android.util.Log.d("DownloadActivity", "$filesExtracted files extracted to ${picturesDir.absolutePath}")

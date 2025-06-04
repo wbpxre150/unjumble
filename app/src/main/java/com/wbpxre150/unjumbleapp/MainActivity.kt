@@ -17,6 +17,9 @@ import android.content.SharedPreferences
 import kotlin.math.roundToInt
 import java.io.File
 import android.view.animation.AnimationUtils
+import kotlinx.coroutines.*
+import java.io.FileOutputStream
+import java.net.URL
 
 class MainActivity : Activity() {
 
@@ -54,6 +57,7 @@ class MainActivity : Activity() {
     private var torrentManager: TorrentManager? = null
     private var peerUpdateHandler: Handler = Handler(Looper.getMainLooper())
     private var peerUpdateRunnable: Runnable? = null
+    private var backgroundDownloadJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -103,11 +107,14 @@ class MainActivity : Activity() {
         // Initialize TorrentManager for seeding (after UI is set up)
         torrentManager = TorrentManager.getInstance(this)
         
-        // Start seeding if files are already downloaded
+        // Check for existing torrent file and start seeding/background download
         val downloadedFile = File(cacheDir, "pictures.tar.gz")
         if (downloadedFile.exists()) {
             // Use the enhanced seedFile method that can restore from stored magnet link
             torrentManager!!.seedFile(downloadedFile.absolutePath)
+        } else {
+            // Pictures are extracted but no archive for seeding - start background download
+            startBackgroundDownload()
         }
         
         updateScoreAndLevel()
@@ -142,6 +149,11 @@ class MainActivity : Activity() {
             savePlayTime()
         }
         stopPeerCountUpdates()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        backgroundDownloadJob?.cancel()
     }
 
     override fun onResume() {
@@ -754,6 +766,61 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             android.util.Log.e("MainActivity", "Error updating peer count", e)
             peerCountTextView.text = "Torrent: Status error"
+        }
+    }
+    
+    private fun startBackgroundDownload() {
+        // Only start if not already downloading
+        if (backgroundDownloadJob?.isActive == true) {
+            return
+        }
+        
+        android.util.Log.d("MainActivity", "Starting background download for seeding")
+        
+        backgroundDownloadJob = GlobalScope.launch(Dispatchers.IO) {
+            try {
+                val downloadFile = File(cacheDir, "pictures.tar.gz")
+                
+                // Check if file already exists (race condition protection)
+                if (downloadFile.exists()) {
+                    android.util.Log.d("MainActivity", "Archive file already exists, starting seeding")
+                    withContext(Dispatchers.Main) {
+                        torrentManager?.seedFile(downloadFile.absolutePath)
+                    }
+                    return@launch
+                }
+                
+                val url = URL("https://unjumble.au/files/pictures.tar.gz")
+                android.util.Log.d("MainActivity", "Background downloading: ${url}")
+                
+                val connection = url.openConnection()
+                val inputStream = connection.getInputStream()
+                val outputStream = FileOutputStream(downloadFile)
+                
+                val buffer = ByteArray(8192)
+                var count: Int
+                var totalBytes = 0L
+                
+                while (inputStream.read(buffer).also { count = it } != -1) {
+                    outputStream.write(buffer, 0, count)
+                    totalBytes += count
+                }
+                
+                outputStream.close()
+                inputStream.close()
+                
+                android.util.Log.d("MainActivity", "Background download completed: ${totalBytes} bytes")
+                
+                // Start seeding the downloaded file
+                withContext(Dispatchers.Main) {
+                    torrentManager?.seedFile(downloadFile.absolutePath)
+                    android.util.Log.d("MainActivity", "Started seeding background downloaded file")
+                }
+                
+            } catch (e: Exception) {
+                android.util.Log.w("MainActivity", "Background download failed: ${e.message}")
+                // Silent failure - don't disrupt gameplay
+            }
         }
     }
 }
