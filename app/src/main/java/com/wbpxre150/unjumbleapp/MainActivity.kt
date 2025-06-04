@@ -920,9 +920,9 @@ class MainActivity : Activity(), TorrentDownloadListener {
         
         // Check if LibTorrent is available before attempting P2P
         if (torrentManager?.isLibraryLoaded() != true) {
-            android.util.Log.d("MainActivity", "LibTorrent not available, falling back to HTTPS")
-            peerCountTextView.text = "Torrent: P2P unavailable, using HTTPS..."
-            fallbackToHttpsDownload()
+            android.util.Log.d("MainActivity", "LibTorrent not available, cannot download")
+            peerCountTextView.text = "Torrent: P2P library not available"
+            isBackgroundDownloading = false
             return
         }
         
@@ -933,90 +933,6 @@ class MainActivity : Activity(), TorrentDownloadListener {
         torrentManager?.downloadFile(magnetLink, downloadFile.absolutePath, this)
     }
     
-    private fun fallbackToHttpsDownload() {
-        android.util.Log.d("MainActivity", "Starting background HTTPS download as fallback")
-        
-        backgroundDownloadJob = GlobalScope.launch(Dispatchers.IO) {
-            try {
-                val downloadFile = File(cacheDir, "pictures.tar.gz")
-                
-                // Check if valid file already exists (race condition protection)
-                if (verifyFileHash(downloadFile)) {
-                    android.util.Log.d("MainActivity", "Valid archive file already exists, starting seeding")
-                    withContext(Dispatchers.Main) {
-                        torrentManager?.seedFile(downloadFile.absolutePath, this@MainActivity)
-                        isBackgroundDownloading = false
-                    }
-                    return@launch
-                } else if (downloadFile.exists()) {
-                    android.util.Log.w("MainActivity", "Archive file exists but corrupted - deleting before download")
-                    downloadFile.delete()
-                }
-                
-                val url = URL("https://unjumble.au/files/pictures.tar.gz")
-                android.util.Log.d("MainActivity", "Background downloading: ${url}")
-                
-                val connection = url.openConnection()
-                val fileLength = connection.contentLength.toLong()
-                val inputStream = connection.getInputStream()
-                val outputStream = FileOutputStream(downloadFile)
-                
-                val buffer = ByteArray(8192)
-                var count: Int
-                var totalBytes = 0L
-                var lastUpdateTime = System.currentTimeMillis()
-                
-                while (inputStream.read(buffer).also { count = it } != -1) {
-                    outputStream.write(buffer, 0, count)
-                    totalBytes += count
-                    
-                    val currentTime = System.currentTimeMillis()
-                    if (currentTime - lastUpdateTime >= 2000) { // Update every 2 seconds
-                        val progress = if (fileLength > 0) (totalBytes.toFloat() / fileLength * 100).toInt() else 0
-                        val downloadedMB = totalBytes / (1024 * 1024)
-                        val totalMB = fileLength / (1024 * 1024)
-                        
-                        withContext(Dispatchers.Main) {
-                            if (fileLength > 0) {
-                                peerCountTextView.text = "Background Download: $progress% (${downloadedMB}MB/${totalMB}MB) - HTTPS"
-                            } else {
-                                peerCountTextView.text = "Background Download: ${downloadedMB}MB downloaded - HTTPS"
-                            }
-                        }
-                        
-                        lastUpdateTime = currentTime
-                    }
-                }
-                
-                outputStream.close()
-                inputStream.close()
-                
-                android.util.Log.d("MainActivity", "Background HTTPS download completed: ${totalBytes} bytes")
-                
-                // Verify the downloaded file before seeding
-                withContext(Dispatchers.Main) {
-                    if (verifyFileHash(downloadFile)) {
-                        android.util.Log.d("MainActivity", "Downloaded file hash verified successfully")
-                        peerCountTextView.text = "Background Download: Complete (HTTPS) - Hash verified, starting seeding..."
-                        torrentManager?.seedFile(downloadFile.absolutePath, this@MainActivity)
-                        android.util.Log.d("MainActivity", "Started seeding verified background downloaded file")
-                    } else {
-                        android.util.Log.e("MainActivity", "Downloaded file hash verification failed - deleting corrupted file")
-                        peerCountTextView.text = "Background Download: Hash verification failed - file corrupted"
-                        downloadFile.delete()
-                    }
-                    isBackgroundDownloading = false
-                }
-                
-            } catch (e: Exception) {
-                android.util.Log.w("MainActivity", "Background HTTPS download failed: ${e.message}")
-                withContext(Dispatchers.Main) {
-                    peerCountTextView.text = "Background Download: HTTPS failed - ${e.message}"
-                    isBackgroundDownloading = false
-                }
-            }
-        }
-    }
     
     // TorrentDownloadListener implementation for background download
     override fun onProgress(downloaded: Long, total: Long, downloadRate: Int, peers: Int) {
@@ -1047,12 +963,10 @@ class MainActivity : Activity(), TorrentDownloadListener {
             torrentManager?.seedFile(filePath, this)
         } else {
             android.util.Log.e("MainActivity", "P2P downloaded file hash verification failed - deleting corrupted file")
-            peerCountTextView.text = "Background Download: Hash verification failed - retrying with HTTPS..."
+            peerCountTextView.text = "Background Download: Hash verification failed - file corrupted"
             downloadedFile.delete()
-            // Fallback to HTTPS download
-            Handler(Looper.getMainLooper()).postDelayed({
-                fallbackToHttpsDownload()
-            }, 2000)
+            // Don't retry - file was corrupted
+            android.util.Log.w("MainActivity", "P2P downloaded file was corrupted - not retrying")
         }
     }
     
@@ -1060,24 +974,20 @@ class MainActivity : Activity(), TorrentDownloadListener {
         android.util.Log.w("MainActivity", "Background P2P download failed: $error")
         isBackgroundDownloading = false
         
-        peerCountTextView.text = "Background Download: P2P failed - Trying HTTPS..."
+        peerCountTextView.text = "Torrent: P2P download failed - $error"
         
-        // Fallback to HTTPS download
-        Handler(Looper.getMainLooper()).postDelayed({
-            fallbackToHttpsDownload()
-        }, 2000) // Wait 2 seconds before fallback
+        // Don't fallback to HTTPS - keep torrent-only
+        android.util.Log.d("MainActivity", "P2P download failed, staying torrent-only")
     }
     
     override fun onTimeout() {
         android.util.Log.w("MainActivity", "Background P2P download timed out")
         isBackgroundDownloading = false
         
-        peerCountTextView.text = "Background Download: P2P timeout - Trying HTTPS..."
+        peerCountTextView.text = "Torrent: P2P download timed out - no peers found"
         
-        // Fallback to HTTPS download
-        Handler(Looper.getMainLooper()).postDelayed({
-            fallbackToHttpsDownload()
-        }, 2000) // Wait 2 seconds before fallback
+        // Don't fallback to HTTPS - keep torrent-only
+        android.util.Log.d("MainActivity", "P2P download timed out, staying torrent-only")
     }
 
     override fun onVerifying(progress: Float) {
@@ -1113,8 +1023,8 @@ class MainActivity : Activity(), TorrentDownloadListener {
                 // Don't re-download if we have a valid file, just note that seeding isn't working
                 val downloadFile = File(cacheDir, "pictures.tar.gz")
                 if (!verifyFileHash(downloadFile)) {
-                    android.util.Log.d("MainActivity", "No valid file and no P2P library - starting background download")
-                    startBackgroundTorrentDownload()
+                    android.util.Log.d("MainActivity", "No valid file and no P2P library - cannot download")
+                    peerCountTextView.text = "Torrent: No file, P2P unavailable"
                 }
             }
             else -> {
@@ -1129,13 +1039,13 @@ class MainActivity : Activity(), TorrentDownloadListener {
                     // Accept that seeding might not work due to network/peer issues
                     // This is not a critical failure - the app can function without seeding
                 } else {
-                    android.util.Log.w("MainActivity", "Seeding timeout and file is corrupted - deleting and re-downloading")
-                    peerCountTextView.text = "Torrent: File corrupted - re-downloading..."
+                    android.util.Log.w("MainActivity", "Seeding timeout and file is corrupted - deleting corrupted file")
+                    peerCountTextView.text = "Torrent: File corrupted, deleted"
                     if (downloadFile.exists()) {
                         downloadFile.delete()
                         android.util.Log.d("MainActivity", "Deleted corrupted torrent file")
                     }
-                    startBackgroundTorrentDownload()
+                    // Don't re-download - stay torrent-only
                 }
             }
         }
