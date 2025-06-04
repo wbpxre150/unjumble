@@ -5,4 +5,5 @@ interface TorrentDownloadListener {
     fun onCompleted(filePath: String)
     fun onError(error: String)
     fun onTimeout()
+    fun onVerifying(progress: Float)
 }

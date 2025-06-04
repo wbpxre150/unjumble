@@ -20,6 +20,8 @@ import android.view.animation.AnimationUtils
 import kotlinx.coroutines.*
 import java.io.FileOutputStream
 import java.net.URL
+import java.security.MessageDigest
+import java.io.FileInputStream
 
 class MainActivity : Activity(), TorrentDownloadListener {
 
@@ -60,6 +62,11 @@ class MainActivity : Activity(), TorrentDownloadListener {
     private var backgroundDownloadJob: Job? = null
     private var isBackgroundDownloading = false
     private var isSeedingInitializing = false
+    
+    companion object {
+        // Expected SHA-256 hash of the correct pictures.tar.gz file
+        private const val EXPECTED_FILE_HASH = "ca09ad71a399a6b3b1dde84be3b0d3c16e7f92e71f5548660d852e9f18df3dbb"
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -111,13 +118,13 @@ class MainActivity : Activity(), TorrentDownloadListener {
         torrentManager = TorrentManager.getInstance(this)
         android.util.Log.d("MainActivity", "TorrentManager initialized, library loaded: ${torrentManager?.isLibraryLoaded()}")
         
-        // Check for existing torrent file and start seeding/background download
+        // Check for existing torrent file and verify its integrity with hash verification
         val downloadedFile = File(cacheDir, "pictures.tar.gz")
         android.util.Log.d("MainActivity", "Checking for torrent file: ${downloadedFile.absolutePath}, exists: ${downloadedFile.exists()}")
         
-        if (downloadedFile.exists() && downloadedFile.length() > 0) {
-            android.util.Log.d("MainActivity", "Found existing torrent file (${downloadedFile.length()} bytes), starting seeding")
-            peerCountTextView.text = "Torrent: Found archive file, starting seeding..."
+        if (verifyFileHash(downloadedFile)) {
+            android.util.Log.d("MainActivity", "Found valid torrent file (${downloadedFile.length()} bytes), hash verified, starting seeding")
+            peerCountTextView.text = "Torrent: Valid archive file found, starting seeding..."
             // Use the enhanced seedFile method that can restore from stored magnet link
             try {
                 isSeedingInitializing = true
@@ -127,8 +134,21 @@ class MainActivity : Activity(), TorrentDownloadListener {
                 // Run seeding initialization in background thread
                 GlobalScope.launch(Dispatchers.IO) {
                     try {
-                        torrentManager!!.seedFile(downloadedFile.absolutePath)
+                        torrentManager!!.seedFile(downloadedFile.absolutePath, this@MainActivity)
                         android.util.Log.d("MainActivity", "Seeding initiation completed")
+                        
+                        // Check immediately after seedFile completes
+                        withContext(Dispatchers.Main) {
+                            delay(1000) // Give it a moment to process
+                            val isSeeding = torrentManager?.isSeeding() ?: false
+                            android.util.Log.d("MainActivity", "Immediate seeding check after seedFile: $isSeeding")
+                            
+                            if (isSeeding) {
+                                android.util.Log.d("MainActivity", "Seeding started successfully immediately")
+                                isSeedingInitializing = false
+                                peerCountTextView.text = "Torrent: Seeding started successfully"
+                            }
+                        }
                     } catch (e: Exception) {
                         android.util.Log.e("MainActivity", "Seeding initiation failed: ${e.message}", e)
                         withContext(Dispatchers.Main) {
@@ -138,23 +158,52 @@ class MainActivity : Activity(), TorrentDownloadListener {
                     }
                 }
                 
-                // Set multiple status checks - quick check and final timeout
+                // Set multiple status checks with progressive timeouts
                 Handler(Looper.getMainLooper()).postDelayed({
-                    // Quick status check after 5 seconds
+                    // Quick status check after 3 seconds
                     if (isSeedingInitializing) {
                         val isSeeding = torrentManager?.isSeeding() ?: false
+                        android.util.Log.d("MainActivity", "Quick check (3s): isSeedingInitializing=$isSeedingInitializing, isSeeding=$isSeeding")
                         if (isSeeding) {
                             android.util.Log.d("MainActivity", "Quick check: Seeding started successfully")
                             checkSeedingInitialization()
                         } else {
-                            peerCountTextView.text = "Torrent: Still initializing... (fetching metadata)"
+                            peerCountTextView.text = "Torrent: Fetching magnet metadata..."
                         }
                     }
-                }, 5000) // 5 second quick check
+                }, 3000) // 3 second quick check
+                
+                Handler(Looper.getMainLooper()).postDelayed({
+                    // Medium check after 8 seconds
+                    if (isSeedingInitializing) {
+                        val isSeeding = torrentManager?.isSeeding() ?: false
+                        android.util.Log.d("MainActivity", "Medium check (8s): isSeedingInitializing=$isSeedingInitializing, isSeeding=$isSeeding")
+                        if (isSeeding) {
+                            android.util.Log.d("MainActivity", "Medium check: Seeding started successfully")
+                            checkSeedingInitialization()
+                        } else {
+                            peerCountTextView.text = "Torrent: Magnet restoration taking longer than expected..."
+                        }
+                    }
+                }, 8000) // 8 second medium check
+                
+                Handler(Looper.getMainLooper()).postDelayed({
+                    // Final check after 15 seconds
+                    if (isSeedingInitializing) {
+                        val isSeeding = torrentManager?.isSeeding() ?: false
+                        android.util.Log.d("MainActivity", "Extended check (15s): isSeedingInitializing=$isSeedingInitializing, isSeeding=$isSeeding")
+                        if (isSeeding) {
+                            android.util.Log.d("MainActivity", "Extended check: Seeding started successfully")
+                            checkSeedingInitialization()
+                        } else {
+                            peerCountTextView.text = "Torrent: Still fetching metadata, please wait..."
+                        }
+                    }
+                }, 15000) // 15 second extended check
                 
                 Handler(Looper.getMainLooper()).postDelayed({
                     checkSeedingInitialization()
-                }, 15000) // 15 second final timeout
+                }, 25000) // 25 second final timeout to allow for magnet fetch
                 
             } catch (e: Exception) {
                 android.util.Log.e("MainActivity", "Failed to start seeding: ${e.message}", e)
@@ -162,8 +211,15 @@ class MainActivity : Activity(), TorrentDownloadListener {
                 peerCountTextView.text = "Torrent: Failed to start seeding - ${e.message}"
             }
         } else {
-            android.util.Log.d("MainActivity", "No torrent file found, starting background download")
-            // Pictures are extracted but no archive for seeding - start background torrent download
+            if (downloadedFile.exists()) {
+                android.util.Log.w("MainActivity", "Torrent file exists but hash verification failed - deleting corrupted file")
+                downloadedFile.delete()
+                peerCountTextView.text = "Torrent: Corrupted file detected, re-downloading..."
+            } else {
+                android.util.Log.d("MainActivity", "No torrent file found, starting background download")
+                peerCountTextView.text = "Torrent: No archive file, downloading..."
+            }
+            // Pictures are extracted but no valid archive for seeding - start background torrent download
             startBackgroundTorrentDownload()
         }
         
@@ -819,7 +875,12 @@ class MainActivity : Activity(), TorrentDownloadListener {
                     peerCountTextView.text = "Torrent: Library not available"
                 }
                 File(cacheDir, "pictures.tar.gz").exists() -> {
-                    peerCountTextView.text = "Torrent: File exists, initializing seeding..."
+                    val downloadFile = File(cacheDir, "pictures.tar.gz")
+                    if (verifyFileHash(downloadFile)) {
+                        peerCountTextView.text = "Torrent: Valid file exists, initializing seeding..."
+                    } else {
+                        peerCountTextView.text = "Torrent: File corrupted, will re-download..."
+                    }
                 }
                 else -> {
                     peerCountTextView.text = "Torrent: No archive file - downloading in background"
@@ -844,13 +905,17 @@ class MainActivity : Activity(), TorrentDownloadListener {
         
         val downloadFile = File(cacheDir, "pictures.tar.gz")
         
-        // Check if file already exists (race condition protection)
-        if (downloadFile.exists() && downloadFile.length() > 0) {
-            android.util.Log.d("MainActivity", "Archive file already exists (${downloadFile.length()} bytes), starting seeding")
-            torrentManager?.seedFile(downloadFile.absolutePath)
+        // Check if valid file already exists (race condition protection)
+        if (verifyFileHash(downloadFile)) {
+            android.util.Log.d("MainActivity", "Valid archive file already exists (${downloadFile.length()} bytes), starting seeding")
+            torrentManager?.seedFile(downloadFile.absolutePath, this)
             isBackgroundDownloading = false
-            peerCountTextView.text = "Torrent: File found, starting seeding..."
+            peerCountTextView.text = "Torrent: Valid file found, starting seeding..."
             return
+        } else if (downloadFile.exists()) {
+            android.util.Log.w("MainActivity", "Archive file exists but hash verification failed - deleting corrupted file")
+            downloadFile.delete()
+            peerCountTextView.text = "Torrent: Removing corrupted file..."
         }
         
         // Check if LibTorrent is available before attempting P2P
@@ -875,14 +940,17 @@ class MainActivity : Activity(), TorrentDownloadListener {
             try {
                 val downloadFile = File(cacheDir, "pictures.tar.gz")
                 
-                // Check if file already exists (race condition protection)
-                if (downloadFile.exists()) {
-                    android.util.Log.d("MainActivity", "Archive file already exists, starting seeding")
+                // Check if valid file already exists (race condition protection)
+                if (verifyFileHash(downloadFile)) {
+                    android.util.Log.d("MainActivity", "Valid archive file already exists, starting seeding")
                     withContext(Dispatchers.Main) {
-                        torrentManager?.seedFile(downloadFile.absolutePath)
+                        torrentManager?.seedFile(downloadFile.absolutePath, this@MainActivity)
                         isBackgroundDownloading = false
                     }
                     return@launch
+                } else if (downloadFile.exists()) {
+                    android.util.Log.w("MainActivity", "Archive file exists but corrupted - deleting before download")
+                    downloadFile.delete()
                 }
                 
                 val url = URL("https://unjumble.au/files/pictures.tar.gz")
@@ -925,12 +993,19 @@ class MainActivity : Activity(), TorrentDownloadListener {
                 
                 android.util.Log.d("MainActivity", "Background HTTPS download completed: ${totalBytes} bytes")
                 
-                // Start seeding the downloaded file
+                // Verify the downloaded file before seeding
                 withContext(Dispatchers.Main) {
-                    peerCountTextView.text = "Background Download: Complete (HTTPS) - Starting seeding..."
-                    torrentManager?.seedFile(downloadFile.absolutePath)
+                    if (verifyFileHash(downloadFile)) {
+                        android.util.Log.d("MainActivity", "Downloaded file hash verified successfully")
+                        peerCountTextView.text = "Background Download: Complete (HTTPS) - Hash verified, starting seeding..."
+                        torrentManager?.seedFile(downloadFile.absolutePath, this@MainActivity)
+                        android.util.Log.d("MainActivity", "Started seeding verified background downloaded file")
+                    } else {
+                        android.util.Log.e("MainActivity", "Downloaded file hash verification failed - deleting corrupted file")
+                        peerCountTextView.text = "Background Download: Hash verification failed - file corrupted"
+                        downloadFile.delete()
+                    }
                     isBackgroundDownloading = false
-                    android.util.Log.d("MainActivity", "Started seeding background downloaded file")
                 }
                 
             } catch (e: Exception) {
@@ -964,10 +1039,21 @@ class MainActivity : Activity(), TorrentDownloadListener {
         android.util.Log.d("MainActivity", "Background P2P download completed: $filePath")
         isBackgroundDownloading = false
         
-        // Start seeding the downloaded file
-        torrentManager?.seedFile(filePath)
-        
-        peerCountTextView.text = "Background Download: Complete - Starting seeding..."
+        val downloadedFile = File(filePath)
+        if (verifyFileHash(downloadedFile)) {
+            android.util.Log.d("MainActivity", "P2P downloaded file hash verified successfully")
+            peerCountTextView.text = "Background Download: Complete (P2P) - Hash verified, starting seeding..."
+            // Start seeding the verified downloaded file
+            torrentManager?.seedFile(filePath, this)
+        } else {
+            android.util.Log.e("MainActivity", "P2P downloaded file hash verification failed - deleting corrupted file")
+            peerCountTextView.text = "Background Download: Hash verification failed - retrying with HTTPS..."
+            downloadedFile.delete()
+            // Fallback to HTTPS download
+            Handler(Looper.getMainLooper()).postDelayed({
+                fallbackToHttpsDownload()
+            }, 2000)
+        }
     }
     
     override fun onError(error: String) {
@@ -993,6 +1079,15 @@ class MainActivity : Activity(), TorrentDownloadListener {
             fallbackToHttpsDownload()
         }, 2000) // Wait 2 seconds before fallback
     }
+
+    override fun onVerifying(progress: Float) {
+        val progressPercent = (progress * 100).toInt()
+        if (progress == 0.0f) {
+            peerCountTextView.text = "Torrent: Fetching metadata..."
+        } else {
+            peerCountTextView.text = "Torrent: Verifying $progressPercent%"
+        }
+    }
     
     private fun checkSeedingInitialization() {
         if (!isSeedingInitializing) {
@@ -1015,21 +1110,78 @@ class MainActivity : Activity(), TorrentDownloadListener {
                 android.util.Log.w("MainActivity", "Seeding initialization failed - library not loaded")
                 isSeedingInitializing = false
                 peerCountTextView.text = "Torrent: P2P library not available"
-                // Start background download as fallback
-                startBackgroundTorrentDownload()
+                // Don't re-download if we have a valid file, just note that seeding isn't working
+                val downloadFile = File(cacheDir, "pictures.tar.gz")
+                if (!verifyFileHash(downloadFile)) {
+                    android.util.Log.d("MainActivity", "No valid file and no P2P library - starting background download")
+                    startBackgroundTorrentDownload()
+                }
             }
             else -> {
-                android.util.Log.w("MainActivity", "Seeding initialization timed out - trying background download")
+                android.util.Log.w("MainActivity", "Seeding initialization timed out - checking file validity")
                 isSeedingInitializing = false
-                peerCountTextView.text = "Torrent: Seeding timeout - starting background download"
-                // Delete the potentially corrupted file and restart download
                 val downloadFile = File(cacheDir, "pictures.tar.gz")
-                if (downloadFile.exists()) {
-                    downloadFile.delete()
-                    android.util.Log.d("MainActivity", "Deleted potentially corrupted torrent file")
+                
+                if (verifyFileHash(downloadFile)) {
+                    android.util.Log.w("MainActivity", "File is valid but seeding failed - accepting gracefully")
+                    peerCountTextView.text = "Torrent: File valid, seeding unavailable (P2P issues)"
+                    // File is valid, so don't delete it or re-download
+                    // Accept that seeding might not work due to network/peer issues
+                    // This is not a critical failure - the app can function without seeding
+                } else {
+                    android.util.Log.w("MainActivity", "Seeding timeout and file is corrupted - deleting and re-downloading")
+                    peerCountTextView.text = "Torrent: File corrupted - re-downloading..."
+                    if (downloadFile.exists()) {
+                        downloadFile.delete()
+                        android.util.Log.d("MainActivity", "Deleted corrupted torrent file")
+                    }
+                    startBackgroundTorrentDownload()
                 }
-                startBackgroundTorrentDownload()
             }
         }
+    }
+    
+    /**
+     * Calculate SHA-256 hash of a file
+     */
+    private fun calculateFileHash(file: File): String? {
+        return try {
+            val digest = MessageDigest.getInstance("SHA-256")
+            val fis = FileInputStream(file)
+            val buffer = ByteArray(8192)
+            var bytesRead: Int
+            
+            while (fis.read(buffer).also { bytesRead = it } != -1) {
+                digest.update(buffer, 0, bytesRead)
+            }
+            fis.close()
+            
+            // Convert to hex string
+            digest.digest().joinToString("") { "%02x".format(it) }
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Failed to calculate file hash: ${e.message}", e)
+            null
+        }
+    }
+    
+    /**
+     * Verify if the downloaded file has the correct hash
+     */
+    private fun verifyFileHash(file: File): Boolean {
+        if (!file.exists() || file.length() == 0L) {
+            android.util.Log.d("MainActivity", "File verification failed: file doesn't exist or is empty")
+            return false
+        }
+        
+        val actualHash = calculateFileHash(file)
+        if (actualHash == null) {
+            android.util.Log.w("MainActivity", "File verification failed: could not calculate hash")
+            return false
+        }
+        
+        val isValid = actualHash.equals(EXPECTED_FILE_HASH, ignoreCase = true)
+        android.util.Log.d("MainActivity", "File hash verification: expected=$EXPECTED_FILE_HASH, actual=$actualHash, valid=$isValid")
+        
+        return isValid
     }
 }

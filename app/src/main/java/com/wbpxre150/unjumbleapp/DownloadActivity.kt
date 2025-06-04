@@ -112,7 +112,7 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
             try {
                 extractFiles(File(filePath))
                 // Start seeding after successful extraction, keeping the original file
-                torrentManager.seedFile(filePath)
+                torrentManager.seedFile(filePath, this@DownloadActivity)
             } catch (e: Exception) {
                 e.printStackTrace()
                 statusTextView.text = "Error extracting files: ${e.message}"
@@ -133,6 +133,18 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         android.util.Log.w("DownloadActivity", "P2P download timed out")
         GlobalScope.launch(Dispatchers.Main) {
             fallbackToHttpsDownload()
+        }
+    }
+
+    override fun onVerifying(progress: Float) {
+        val progressPercent = (progress * 100).toInt()
+        progressBar.progress = progressPercent
+        if (progress == 0.0f) {
+            statusTextView.text = "Fetching torrent metadata..."
+            timeRemainingTextView.text = "Connecting to DHT network..."
+        } else {
+            statusTextView.text = "Verifying torrent: $progressPercent%"
+            timeRemainingTextView.text = "Checking file integrity..."
         }
     }
 

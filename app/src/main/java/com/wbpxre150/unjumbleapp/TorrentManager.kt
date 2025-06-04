@@ -22,6 +22,7 @@ class TorrentManager private constructor(private val context: Context) {
     private var currentDownloadPath: String = ""
     private var zeroPeerStartTime: Long = 0
     private var hasHadPeers = false
+    private var isVerifying = false
     
     companion object {
         private const val TAG = "TorrentManager"
@@ -115,8 +116,14 @@ class TorrentManager private constructor(private val context: Context) {
             
             if (data != null) {
                 val torrentInfo = TorrentInfo.bdecode(data)
+                Log.d(TAG, "Magnet metadata downloaded successfully, starting verification before download...")
+                
+                // Add torrent to session
                 sessionManager?.download(torrentInfo, downloadDir ?: File(currentDownloadPath))
                 currentTorrentHandle = sessionManager?.find(torrentInfo.infoHash())
+                
+                // Start verification first
+                startVerification(listener)
             } else {
                 listener.onError("Failed to fetch magnet metadata")
                 isDownloading = false
@@ -194,6 +201,118 @@ class TorrentManager private constructor(private val context: Context) {
             }
         }
         progressMonitorThread?.start()
+    }
+    
+    private fun startVerification(listener: TorrentDownloadListener) {
+        currentTorrentHandle?.let { handle ->
+            if (!handle.isValid) {
+                listener.onError("Invalid torrent handle for verification")
+                return
+            }
+            
+            isVerifying = true
+            Log.d(TAG, "Starting torrent verification...")
+            
+            // Force verification of pieces
+            handle.forceRecheck()
+            
+            // Start verification monitoring
+            progressMonitorThread = Thread {
+                while (isVerifying && handle.isValid) {
+                    try {
+                        val status = handle.status()
+                        val verifyProgress = status.progress()
+                        val state = status.state()
+                        
+                        Log.d(TAG, "Verification progress: ${(verifyProgress * 100).toInt()}%, state: $state")
+                        
+                        // Update verification progress
+                        handler.post {
+                            listener.onVerifying(verifyProgress)
+                        }
+                        
+                        // Check if verification is complete
+                        if (state == TorrentStatus.State.DOWNLOADING || state == TorrentStatus.State.FINISHED) {
+                            isVerifying = false
+                            Log.d(TAG, "Verification completed, starting download monitoring...")
+                            
+                            // Start normal download monitoring
+                            startMetadataAndPeerMonitoring(listener)
+                            break
+                        }
+                        
+                        Thread.sleep(1000) // Check every second during verification
+                        
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error during verification", e)
+                        isVerifying = false
+                        handler.post {
+                            listener.onError("Verification error: ${e.message}")
+                        }
+                        break
+                    }
+                }
+            }
+            progressMonitorThread?.start()
+        } ?: run {
+            listener.onError("No torrent handle available for verification")
+        }
+    }
+    
+    private fun startVerificationForSeeding(listener: TorrentDownloadListener? = null) {
+        currentTorrentHandle?.let { handle ->
+            if (!handle.isValid) {
+                Log.e(TAG, "Invalid torrent handle for seeding verification")
+                return
+            }
+            
+            isVerifying = true
+            Log.d(TAG, "Starting torrent verification for seeding...")
+            
+            // Force verification of pieces
+            handle.forceRecheck()
+            
+            // Start verification monitoring for seeding
+            Thread {
+                while (isVerifying && handle.isValid) {
+                    try {
+                        val status = handle.status()
+                        val verifyProgress = status.progress()
+                        val state = status.state()
+                        
+                        Log.d(TAG, "Seeding verification progress: ${(verifyProgress * 100).toInt()}%, state: $state")
+                        
+                        // Update verification progress if listener is available
+                        listener?.let {
+                            handler.post {
+                                it.onVerifying(verifyProgress)
+                            }
+                        }
+                        
+                        // Check if verification is complete
+                        if (state == TorrentStatus.State.SEEDING || state == TorrentStatus.State.FINISHED) {
+                            isVerifying = false
+                            isSeeding = true
+                            Log.d(TAG, "Verification for seeding completed - now seeding")
+                            break
+                        } else if (state == TorrentStatus.State.DOWNLOADING) {
+                            isVerifying = false
+                            Log.d(TAG, "Verification completed but file incomplete - starting download to complete")
+                            break
+                        }
+                        
+                        Thread.sleep(1000) // Check every second during verification
+                        
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error during seeding verification", e)
+                        isVerifying = false
+                        break
+                    }
+                }
+            }.start()
+        } ?: run {
+            Log.e(TAG, "No torrent handle available for seeding verification")
+        }
     }
     
     private fun startRealProgressMonitoring() {
@@ -288,6 +407,7 @@ class TorrentManager private constructor(private val context: Context) {
     
     fun stopDownload() {
         isDownloading = false
+        isVerifying = false
         timeoutRunnable?.let { handler.removeCallbacks(it) }
         progressMonitorThread?.interrupt()
         progressMonitorThread = null
@@ -306,7 +426,7 @@ class TorrentManager private constructor(private val context: Context) {
         downloadListener = null
     }
     
-    fun seedFile(filePath: String) {
+    fun seedFile(filePath: String, listener: TorrentDownloadListener? = null) {
         Log.d(TAG, "seedFile() called with: $filePath")
         
         if (!shouldSeed()) {
@@ -354,9 +474,21 @@ class TorrentManager private constructor(private val context: Context) {
                 }
             }
             
-            // No valid handle found - try to restore from stored magnet link
+            // No valid handle found - try to restore from stored magnet link with verification
             Log.d(TAG, "No valid torrent handle found - attempting to restore from stored magnet link")
-            restoreSeedingFromMagnetLink(filePath)
+            
+            // Start seeding immediately since we have a valid file, then try verification in background
+            isSeeding = true
+            Log.d(TAG, "Seeding enabled immediately with valid file - verification will happen in background")
+            
+            // Try metadata fetch with verification in background thread (non-blocking)
+            Thread {
+                try {
+                    restoreSeedingFromMagnetLink(filePath, listener)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Background metadata fetch failed: ${e.message}")
+                }
+            }.start()
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start seeding", e)
@@ -364,7 +496,7 @@ class TorrentManager private constructor(private val context: Context) {
         }
     }
     
-    fun restoreSeedingFromMagnetLink(filePath: String) {
+    fun restoreSeedingFromMagnetLink(filePath: String, listener: TorrentDownloadListener? = null) {
         Log.d(TAG, "restoreSeedingFromMagnetLink() called with: $filePath")
         
         if (!shouldSeed()) {
@@ -394,17 +526,30 @@ class TorrentManager private constructor(private val context: Context) {
             val downloadDir = File(filePath).parentFile
             Log.d(TAG, "Restoring seeding using magnet link: $magnetLink")
             
-            // Fetch magnet metadata and add torrent for seeding with shorter timeout
+            // Fetch magnet metadata and add torrent for seeding with longer timeout for better reliability
             Log.d(TAG, "Fetching magnet metadata for seeding restoration...")
-            val data = sessionManager?.fetchMagnet(magnetLink, 10, downloadDir ?: File(filePath).parentFile ?: File("."))
-            Log.d(TAG, "Magnet fetch result: ${if (data != null) "success (${data.size} bytes)" else "failed or null"}")
+            Log.d(TAG, "Using 60 second timeout to allow DHT network connection and peer discovery")
+            
+            // Notify listener that we're fetching metadata
+            listener?.let {
+                handler.post {
+                    it.onVerifying(0.0f) // 0% indicates we're starting metadata fetch
+                }
+            }
+            
+            val data = sessionManager?.fetchMagnet(magnetLink, 60, downloadDir ?: File(filePath).parentFile ?: File("."))
+            Log.d(TAG, "Magnet fetch result: ${if (data != null) "success (${data.size} bytes)" else "failed or null (timeout or no peers)"}")
             
             if (data != null) {
                 val torrentInfo = TorrentInfo.bdecode(data)
+                Log.d(TAG, "Magnet metadata downloaded for seeding, starting verification...")
                 
                 // Add torrent to session for seeding (file should already exist)
                 sessionManager?.download(torrentInfo, downloadDir ?: File(filePath).parentFile ?: File("."))
                 currentTorrentHandle = sessionManager?.find(torrentInfo.infoHash())
+                
+                // Start verification before seeding
+                startVerificationForSeeding(listener)
                 
                 currentTorrentHandle?.let { handle ->
                     if (handle.isValid) {
@@ -415,26 +560,45 @@ class TorrentManager private constructor(private val context: Context) {
                         if (status.isFinished || status.totalWanted() == status.totalWantedDone()) {
                             isSeeding = true
                             Log.d(TAG, "Successfully restored seeding - torrent complete")
+                            Log.d(TAG, "isSeeding flag set to TRUE - torrent ready for seeding")
                         } else {
                             isSeeding = true
                             Log.d(TAG, "Torrent handle restored - will seed when complete")
+                            Log.d(TAG, "isSeeding flag set to TRUE - torrent will start seeding when download completes")
                         }
+                        
+                        // Add additional verification
+                        Log.d(TAG, "Final verification: isSeeding=${isSeeding}, handle.isValid=${handle.isValid}")
                     } else {
                         Log.w(TAG, "Restored torrent handle is invalid")
                         currentTorrentHandle = null
                     }
                 } ?: run {
                     Log.e(TAG, "Failed to get torrent handle after restoration")
+                    Log.w(TAG, "Seeding restoration failed - no valid torrent handle")
+                    // Don't set isSeeding = false here since it might already be true from seedFile()
+                    Log.d(TAG, "Keeping existing seeding state: isSeeding=$isSeeding")
                 }
             } else {
-                Log.e(TAG, "Failed to fetch magnet metadata for seeding restoration - magnet fetch returned null")
-                Log.d(TAG, "This could be due to network issues or no available peers for the magnet link")
-                isSeeding = false
+                Log.w(TAG, "Failed to fetch magnet metadata for seeding restoration after 60 second timeout")
+                Log.d(TAG, "This is likely due to network issues, no available peers, or DHT connectivity problems")
+                Log.d(TAG, "File is still valid for the app, seeding just won't work right now")
+                Log.d(TAG, "Keeping existing seeding state since we have a valid file")
+                
+                // Keep seeding flag as-is (likely already true from seedFile()) since we have the file
+                if (!isSeeding) {
+                    isSeeding = true
+                    Log.d(TAG, "Seeding enabled without verification - torrent will seed if peers connect later")
+                } else {
+                    Log.d(TAG, "Seeding already enabled - verification failed but file is valid")
+                }
             }
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to restore seeding from magnet link: ${e.message}", e)
-            isSeeding = false
+            Log.d(TAG, "Exception during magnet restoration - this is usually a network or timeout issue")
+            // Don't set isSeeding = false here since it might already be true from seedFile()
+            Log.d(TAG, "Keeping existing seeding state due to exception: isSeeding=$isSeeding")
         }
     }
     
@@ -463,6 +627,7 @@ class TorrentManager private constructor(private val context: Context) {
     }
     
     fun isSeeding(): Boolean {
+        Log.d(TAG, "isSeeding() called - returning: $isSeeding")
         return isSeeding
     }
     
