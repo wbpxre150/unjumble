@@ -67,13 +67,15 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:gravity="center"
-            android:layout_marginTop="4dp"
-            android:textSize="12sp"
+            android:layout_marginTop="16dp"
+            android:textSize="14sp"
             android:textColor="@color/secondary"
-            android:visibility="gone"
-            app:layout_constraintTop_toBottomOf="@id/timerTextView"
+            android:visibility="visible"
+            android:text="Torrent status: Loading..."
+            app:layout_constraintTop_toBottomOf="@id/nextWordButton"
             app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintEnd_toEndOf="parent" />
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintBottom_toBottomOf="parent" />
 
         <androidx.cardview.widget.CardView
             android:id="@+id/imageCardView"
@@ -84,7 +86,7 @@
             app:cardElevation="8dp"
             app:cardBackgroundColor="@color/dark_surface"
             app:layout_constraintDimensionRatio="H,4:3"
-            app:layout_constraintTop_toBottomOf="@id/peerCountTextView"
+            app:layout_constraintTop_toBottomOf="@id/timerTextView"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintWidth_percent="0.9"
@@ -259,9 +261,7 @@
             android:textColor="@color/dark_text_primary"
             app:layout_constraintTop_toBottomOf="@id/buttonContainer"
             app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintEnd_toEndOf="parent"
-            app:layout_constraintBottom_toBottomOf="parent"
-            app:layout_constraintVertical_bias="0" />
+            app:layout_constraintEnd_toEndOf="parent" />
 
     </androidx.constraintlayout.widget.ConstraintLayout>
 </ScrollView>

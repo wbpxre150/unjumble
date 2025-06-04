@@ -69,6 +69,7 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         GlobalScope.launch(Dispatchers.Main) {
             try {
                 extractFiles(File(filePath))
+                // Start seeding after successful extraction, keeping the original file
                 torrentManager.seedFile(filePath)
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -173,10 +174,22 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
             }
             tarInputStream.close()
 
-            archiveFile.delete()
+            // Only delete the archive file if seeding is disabled
+            val shouldDeleteArchive = !torrentManager.isSeedingEnabled()
+            if (shouldDeleteArchive) {
+                archiveFile.delete()
+                android.util.Log.d("DownloadActivity", "Archive deleted (seeding disabled)")
+            } else {
+                android.util.Log.d("DownloadActivity", "Archive kept for seeding")
+            }
 
             withContext(Dispatchers.Main) {
-                statusTextView.text = "Extraction complete. $filesExtracted files extracted."
+                val statusMsg = if (shouldDeleteArchive) {
+                    "Extraction complete. $filesExtracted files extracted."
+                } else {
+                    "Extraction complete. $filesExtracted files extracted. File kept for seeding."
+                }
+                statusTextView.text = statusMsg
             }
 
             android.util.Log.d("DownloadActivity", "$filesExtracted files extracted to ${picturesDir.absolutePath}")

@@ -269,7 +269,17 @@ class TorrentManager private constructor(private val context: Context) {
     }
     
     fun seedFile(filePath: String) {
-        if (!shouldSeed() || !File(filePath).exists()) return
+        Log.d(TAG, "seedFile() called with: $filePath")
+        
+        if (!shouldSeed()) {
+            Log.d(TAG, "Seeding disabled by user preference")
+            return
+        }
+        
+        if (!File(filePath).exists()) {
+            Log.e(TAG, "Torrent file does not exist: $filePath")
+            return
+        }
         
         if (!isLibraryAvailable || sessionManager == null) {
             Log.d(TAG, "LibTorrent not available for seeding")
@@ -278,27 +288,39 @@ class TorrentManager private constructor(private val context: Context) {
         
         try {
             val file = File(filePath)
-            Log.d(TAG, "Starting seeding for: $filePath")
+            Log.d(TAG, "Starting seeding for: $filePath (size: ${file.length()} bytes)")
             
-            // If we already have the torrent handle from download, just continue seeding
+            // If we already have the torrent handle from download, configure it for seeding
             currentTorrentHandle?.let { handle ->
                 if (handle.isValid) {
-                    isSeeding = true
-                    Log.d(TAG, "Continuing to seed existing torrent")
-                    return
+                    Log.d(TAG, "Found existing valid torrent handle")
+                    
+                    // Check the current state
+                    val status = handle.status()
+                    Log.d(TAG, "Torrent status: state=${status.state()}, finished=${status.isFinished}, seeding=${status.isSeeding}")
+                    
+                    // If download is complete, start seeding
+                    if (status.isFinished || status.isSeeding || status.totalWanted() == status.totalWantedDone()) {
+                        isSeeding = true
+                        Log.d(TAG, "Torrent is complete - now seeding")
+                        return
+                    } else {
+                        Log.d(TAG, "Torrent not yet complete for seeding: ${status.totalWantedDone()}/${status.totalWanted()}")
+                        // Still mark as seeding since we have the handle and will seed when complete
+                        isSeeding = true
+                        return
+                    }
+                } else {
+                    Log.w(TAG, "Current torrent handle is invalid")
+                    currentTorrentHandle = null
                 }
             }
             
-            // For standalone seeding (if torrent was downloaded elsewhere), 
-            // we would need the original .torrent file or magnet link
-            // For now, just mark as seeding if we have a valid handle
-            if (currentTorrentHandle?.isValid == true) {
-                isSeeding = true
-                Log.d(TAG, "Seeding started for: $filePath")
-            }
+            Log.w(TAG, "No valid torrent handle found - cannot seed standalone file without original magnet/torrent")
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start seeding", e)
+            isSeeding = false
         }
     }
     

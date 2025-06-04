@@ -714,22 +714,38 @@ class MainActivity : Activity() {
     }
     
     private fun updatePeerCount() {
-        val peerCount = torrentManager.getPeerCount()
-        val isSeeding = torrentManager.isSeeding()
-        val uploadRate = torrentManager.getUploadRate()
-        val isLibraryLoaded = torrentManager.isLibraryLoaded()
-        
-        if (isSeeding && peerCount > 0) {
-            val uploadKB = uploadRate / 1024
-            val mode = if (isLibraryLoaded) "P2P" else "Simulated"
-            peerCountTextView.text = "Sharing with $peerCount peers (${uploadKB}KB/s) [$mode]"
-            peerCountTextView.visibility = View.VISIBLE
-        } else if (isSeeding) {
-            val mode = if (isLibraryLoaded) "P2P" else "Simulated"
-            peerCountTextView.text = "Seeding (0 peers) [$mode]"
-            peerCountTextView.visibility = View.VISIBLE
-        } else {
-            peerCountTextView.visibility = View.GONE
+        try {
+            val peerCount = torrentManager.getPeerCount()
+            val isSeeding = torrentManager.isSeeding()
+            val uploadRate = torrentManager.getUploadRate()
+            val isLibraryLoaded = torrentManager.isLibraryLoaded()
+            val isSeedingEnabled = torrentManager.isSeedingEnabled()
+            
+            android.util.Log.d("MainActivity", "Torrent status - seeding: $isSeeding, peers: $peerCount, uploadRate: $uploadRate, libraryLoaded: $isLibraryLoaded, seedingEnabled: $isSeedingEnabled")
+            
+            when {
+                isSeeding && peerCount > 0 -> {
+                    val uploadKB = uploadRate / 1024
+                    val mode = if (isLibraryLoaded) "P2P" else "Simulated"
+                    peerCountTextView.text = "Torrent: Sharing with $peerCount peers (${uploadKB}KB/s) [$mode]"
+                }
+                isSeeding -> {
+                    val mode = if (isLibraryLoaded) "P2P" else "Simulated"
+                    peerCountTextView.text = "Torrent: Seeding (0 peers) [$mode]"
+                }
+                !isSeedingEnabled -> {
+                    peerCountTextView.text = "Torrent: Seeding disabled"
+                }
+                !isLibraryLoaded -> {
+                    peerCountTextView.text = "Torrent: Library not available"
+                }
+                else -> {
+                    peerCountTextView.text = "Torrent: Not seeding (check logs)"
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Error updating peer count", e)
+            peerCountTextView.text = "Torrent: Status error"
         }
     }
 }
