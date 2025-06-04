@@ -36,6 +36,17 @@ Builds:
       - update-java-alternatives -a
     gradle:
       - yes
+  - versionName: 3
+    versionCode: 3
+    commit: v3
+    subdir: app
+    sudo:
+      - apt-get update
+      - apt-get install -y openjdk-17-jdk-headless
+      - update-java-alternatives -a
+    gradle:
+      - yes
+    
 
 AllowedAPKSigningKeys: 480b18292c6be43e3829199c4d6a169b773862144fed576c303f634c4e146ec5
 
