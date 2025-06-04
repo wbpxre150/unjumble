@@ -153,7 +153,7 @@ class TorrentManager private constructor(private val context: Context) {
                     val numPeers = status.numPeers()
                     val hasMetadataFlag = status.hasMetadata()
                     
-                    Log.d(TAG, "Status: peers=$numPeers, hasMetadata=$hasMetadataFlag, state=${status.state()}")
+                    Log.d(TAG, "Status: peers=$numPeers, hasMetadata=$hasMetadataFlag, state=${status.state()}, downloadRate=${status.downloadRate()}")
                     
                     // Check zero-peer timeout
                     if (checkZeroPeerTimeout(numPeers, listener)) {
@@ -171,13 +171,15 @@ class TorrentManager private constructor(private val context: Context) {
                     
                     // If we have metadata, switch to full progress monitoring
                     if (hasMetadata) {
+                        Log.d(TAG, "Metadata acquired, total size: ${status.totalWanted()} bytes")
                         startRealProgressMonitoring()
                         break
                     }
                     
                     // Update progress even without metadata to show peer discovery
                     handler.post {
-                        listener.onProgress(0, 100, 0, numPeers)
+                        // Use 0 total to indicate we're still fetching metadata
+                        listener.onProgress(0, 0, 0, numPeers)
                     }
                     
                     Thread.sleep(2000) // Check every 2 seconds for metadata/peers
@@ -207,6 +209,8 @@ class TorrentManager private constructor(private val context: Context) {
                     val downloadRate = status.downloadRate()
                     val numPeers = status.numPeers()
                     
+                    Log.d(TAG, "Progress: ${totalWantedDone}/${totalWanted} bytes, rate=${downloadRate}B/s, peers=$numPeers")
+                    
                     // Check zero-peer timeout
                     if (checkZeroPeerTimeout(numPeers, downloadListener!!)) {
                         break
@@ -233,6 +237,12 @@ class TorrentManager private constructor(private val context: Context) {
                     // Update progress
                     handler.post {
                         downloadListener?.onProgress(totalWantedDone, totalWanted, downloadRate, numPeers)
+                    }
+                    
+                    // Log progress every 10 seconds for debugging
+                    if (System.currentTimeMillis() % 10000 < 1000) {
+                        val progressPercent = if (totalWanted > 0) (totalWantedDone.toFloat() / totalWanted * 100).toInt() else 0
+                        Log.d(TAG, "Download progress: $progressPercent% - $numPeers peers - ${downloadRate}B/s")
                     }
                     
                     Thread.sleep(1000)
@@ -384,8 +394,10 @@ class TorrentManager private constructor(private val context: Context) {
             val downloadDir = File(filePath).parentFile
             Log.d(TAG, "Restoring seeding using magnet link: $magnetLink")
             
-            // Fetch magnet metadata and add torrent for seeding
-            val data = sessionManager?.fetchMagnet(magnetLink, 30, downloadDir ?: File(filePath).parentFile ?: File("."))
+            // Fetch magnet metadata and add torrent for seeding with shorter timeout
+            Log.d(TAG, "Fetching magnet metadata for seeding restoration...")
+            val data = sessionManager?.fetchMagnet(magnetLink, 10, downloadDir ?: File(filePath).parentFile ?: File("."))
+            Log.d(TAG, "Magnet fetch result: ${if (data != null) "success (${data.size} bytes)" else "failed or null"}")
             
             if (data != null) {
                 val torrentInfo = TorrentInfo.bdecode(data)
@@ -415,11 +427,13 @@ class TorrentManager private constructor(private val context: Context) {
                     Log.e(TAG, "Failed to get torrent handle after restoration")
                 }
             } else {
-                Log.e(TAG, "Failed to fetch magnet metadata for seeding restoration")
+                Log.e(TAG, "Failed to fetch magnet metadata for seeding restoration - magnet fetch returned null")
+                Log.d(TAG, "This could be due to network issues or no available peers for the magnet link")
+                isSeeding = false
             }
             
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to restore seeding from magnet link", e)
+            Log.e(TAG, "Failed to restore seeding from magnet link: ${e.message}", e)
             isSeeding = false
         }
     }

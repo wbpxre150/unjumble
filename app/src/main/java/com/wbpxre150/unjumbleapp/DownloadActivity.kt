@@ -52,8 +52,8 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
     }
 
     private fun startP2PDownload() {
-        statusTextView.text = "Connecting to peers..."
-        timeRemainingTextView.text = "Attempting P2P download..."
+        statusTextView.text = "Initializing P2P download..."
+        timeRemainingTextView.text = "Checking LibTorrent4j availability..."
         
         val magnetLink = getString(R.string.pictures_magnet_link)
         val downloadPath = File(cacheDir, "pictures.tar.gz").absolutePath
@@ -61,6 +61,20 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         // Store magnet link for future seeding sessions
         val prefs = getSharedPreferences("torrent_prefs", MODE_PRIVATE)
         prefs.edit().putString("magnet_link", magnetLink).apply()
+        
+        // Check if LibTorrent is available before attempting download
+        if (!torrentManager.isLibraryLoaded()) {
+            statusTextView.text = "P2P library not available"
+            timeRemainingTextView.text = "Switching to direct download..."
+            GlobalScope.launch(Dispatchers.Main) {
+                delay(2000) // Give user time to read the message
+                fallbackToHttpsDownload()
+            }
+            return
+        }
+        
+        statusTextView.text = "Starting P2P download..."
+        timeRemainingTextView.text = "Connecting to DHT network..."
         
         torrentManager.downloadFile(magnetLink, downloadPath, this)
     }
@@ -74,8 +88,22 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         val remainingBytes = total - downloaded
         val estimatedSeconds = if (downloadRate > 0) (remainingBytes / downloadRate).toInt() else 0
         
-        statusTextView.text = "P2P Download: $progress% ($peers peers)"
-        timeRemainingTextView.text = "Speed: ${downloadSpeedKB}KB/s | ETA: ${formatTime(estimatedSeconds)}"
+        val downloadedMB = downloaded / (1024 * 1024)
+        val totalMB = total / (1024 * 1024)
+        
+        statusTextView.text = if (total > 0) {
+            "P2P Download: $progress% (${downloadedMB}MB/${totalMB}MB) - $peers peers"
+        } else {
+            "P2P Download: Connecting... ($peers peers)"
+        }
+        
+        timeRemainingTextView.text = if (downloadRate > 0) {
+            "Speed: ${downloadSpeedKB}KB/s | ETA: ${formatTime(estimatedSeconds)}"
+        } else if (peers > 0) {
+            "Connected to $peers peers - waiting for data..."
+        } else {
+            "Searching for peers..."
+        }
     }
 
     override fun onCompleted(filePath: String) {
