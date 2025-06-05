@@ -8,10 +8,8 @@ import android.widget.TextView
 import kotlinx.coroutines.*
 import java.io.File
 import java.io.FileOutputStream
-import java.net.URL
 import java.util.zip.GZIPInputStream
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
-import kotlin.math.roundToInt
 
 class DownloadActivity : Activity(), TorrentDownloadListener {
 
@@ -121,7 +119,8 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         isP2PAttemptFinished = true
         android.util.Log.w("DownloadActivity", "P2P download failed: $error")
         GlobalScope.launch(Dispatchers.Main) {
-            fallbackToHttpsDownload()
+            statusTextView.text = "P2P download failed: $error"
+            timeRemainingTextView.text = "Please check your internet connection and try again"
         }
     }
 
@@ -133,7 +132,8 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         isP2PAttemptFinished = true
         android.util.Log.w("DownloadActivity", "P2P download timed out")
         GlobalScope.launch(Dispatchers.Main) {
-            fallbackToHttpsDownload()
+            statusTextView.text = "P2P download timed out"
+            timeRemainingTextView.text = "No peers found. Please try again later."
         }
     }
 
@@ -141,65 +141,14 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         val progressPercent = (progress * 100).toInt()
         progressBar.progress = progressPercent
         if (progress == 0.0f) {
-            statusTextView.text = "Fetching torrent metadata..."
-            timeRemainingTextView.text = "Connecting to DHT network..."
+            statusTextView.text = "Connecting to P2P network..."
+            timeRemainingTextView.text = "Finding peers (this may take a few minutes)..."
         } else {
             statusTextView.text = "Verifying torrent: $progressPercent%"
             timeRemainingTextView.text = "Checking file integrity..."
         }
     }
 
-    private suspend fun fallbackToHttpsDownload() {
-        statusTextView.text = "P2P unavailable, downloading directly..."
-        timeRemainingTextView.text = "Switching to HTTPS download..."
-        downloadAndExtractFiles()
-    }
-
-    private suspend fun downloadAndExtractFiles() {
-        val url = URL("https://unjumble.au/files/pictures.tar.gz")
-
-        withContext(Dispatchers.IO) {
-            val connection = url.openConnection()
-            val fileLength = connection.contentLength.toLong()
-
-            val inputStream = connection.getInputStream()
-            val outputFile = File(cacheDir, "pictures.tar.gz")
-            val outputStream = FileOutputStream(outputFile)
-
-            var bytesRead = 0L
-            val buffer = ByteArray(8192)
-            var count: Int
-            var startTime = System.currentTimeMillis()
-            var lastUpdateTime = startTime
-
-            while (inputStream.read(buffer).also { count = it } != -1) {
-                outputStream.write(buffer, 0, count)
-                bytesRead += count
-                val progress = (bytesRead.toFloat() / fileLength * 100).toInt()
-
-                val currentTime = System.currentTimeMillis()
-                if (currentTime - lastUpdateTime >= 1000) { // Update every second
-                    val elapsedSeconds = (currentTime - startTime) / 1000.0
-                    val downloadSpeed = bytesRead / elapsedSeconds // bytes per second
-                    val remainingBytes = fileLength - bytesRead
-                    val estimatedRemainingSeconds = (remainingBytes / downloadSpeed).roundToInt()
-
-                    withContext(Dispatchers.Main) {
-                        progressBar.progress = progress
-                        statusTextView.text = "Downloading: $progress%"
-                        timeRemainingTextView.text = "Estimated time remaining: ${formatTime(estimatedRemainingSeconds)}"
-                    }
-
-                    lastUpdateTime = currentTime
-                }
-            }
-
-            outputStream.close()
-            inputStream.close()
-
-            extractFiles(outputFile)
-        }
-    }
 
     private suspend fun extractFiles(archiveFile: File) {
         withContext(Dispatchers.IO) {

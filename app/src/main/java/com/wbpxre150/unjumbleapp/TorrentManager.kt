@@ -26,7 +26,7 @@ class TorrentManager private constructor(private val context: Context) {
     
     companion object {
         private const val TAG = "TorrentManager"
-        private const val ZERO_PEER_TIMEOUT_MS = 300000L // 5 minutes with zero peers before timeout
+        private const val ZERO_PEER_TIMEOUT_MS = 600000L // 10 minutes with zero peers before timeout
         
         @Volatile
         private var INSTANCE: TorrentManager? = null
@@ -114,7 +114,12 @@ class TorrentManager private constructor(private val context: Context) {
             Thread {
                 try {
                     Log.d(TAG, "Fetching magnet metadata...")
-                    val data = sessionManager?.fetchMagnet(magnetLink, 120, downloadDir ?: File(currentDownloadPath))
+                    handler.post {
+                        listener.onVerifying(0.0f)
+                    }
+                    
+                    // Use longer timeout to allow DHT network to properly connect and find peers
+                    val data = sessionManager?.fetchMagnet(magnetLink, 300, downloadDir ?: File(currentDownloadPath))
                     
                     if (data != null) {
                         val torrentInfo = TorrentInfo.bdecode(data)
@@ -141,9 +146,9 @@ class TorrentManager private constructor(private val context: Context) {
                         startMetadataAndPeerMonitoring(listener)
                         
                     } else {
-                        Log.w(TAG, "Failed to fetch magnet metadata - this may be due to network issues or no available peers")
+                        Log.w(TAG, "Failed to fetch magnet metadata after 5 minutes - no peers available or network issues")
                         handler.post {
-                            listener.onError("Failed to fetch magnet metadata")
+                            listener.onError("No peers found after 5 minutes. This may be due to network issues or the file is temporarily unavailable.")
                         }
                         isDownloading = false
                     }
