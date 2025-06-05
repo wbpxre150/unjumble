@@ -18,8 +18,6 @@ import kotlin.math.roundToInt
 import java.io.File
 import android.view.animation.AnimationUtils
 import kotlinx.coroutines.*
-import java.io.FileOutputStream
-import java.net.URL
 import java.security.MessageDigest
 import java.io.FileInputStream
 
@@ -59,13 +57,14 @@ class MainActivity : Activity(), TorrentDownloadListener {
     private var torrentManager: TorrentManager? = null
     private var peerUpdateHandler: Handler = Handler(Looper.getMainLooper())
     private var peerUpdateRunnable: Runnable? = null
-    private var backgroundDownloadJob: Job? = null
     private var isBackgroundDownloading = false
     private var isSeedingInitializing = false
+    private var downloadRetryCount = 0
     
     companion object {
         // Expected SHA-256 hash of the correct pictures.tar.gz file
         private const val EXPECTED_FILE_HASH = "ca09ad71a399a6b3b1dde84be3b0d3c16e7f92e71f5548660d852e9f18df3dbb"
+        private const val MAX_DOWNLOAD_RETRIES = 3
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -259,7 +258,6 @@ class MainActivity : Activity(), TorrentDownloadListener {
 
     override fun onDestroy() {
         super.onDestroy()
-        backgroundDownloadJob?.cancel()
         torrentManager?.stopDownload()
     }
 
@@ -954,6 +952,7 @@ class MainActivity : Activity(), TorrentDownloadListener {
     override fun onCompleted(filePath: String) {
         android.util.Log.d("MainActivity", "Background P2P download completed: $filePath")
         isBackgroundDownloading = false
+        downloadRetryCount = 0 // Reset retry counter on success
         
         val downloadedFile = File(filePath)
         if (verifyFileHash(downloadedFile)) {
@@ -971,23 +970,43 @@ class MainActivity : Activity(), TorrentDownloadListener {
     }
     
     override fun onError(error: String) {
-        android.util.Log.w("MainActivity", "Background P2P download failed: $error")
+        android.util.Log.w("MainActivity", "Background P2P download failed: $error (attempt ${downloadRetryCount + 1}/$MAX_DOWNLOAD_RETRIES)")
         isBackgroundDownloading = false
         
-        peerCountTextView.text = "Torrent: P2P download failed - $error"
-        
-        // Don't fallback to HTTPS - keep torrent-only
-        android.util.Log.d("MainActivity", "P2P download failed, staying torrent-only")
+        if (downloadRetryCount < MAX_DOWNLOAD_RETRIES) {
+            downloadRetryCount++
+            peerCountTextView.text = "Torrent: Download error, retrying... (${downloadRetryCount}/$MAX_DOWNLOAD_RETRIES)"
+            
+            // Retry after 10 seconds
+            Handler(Looper.getMainLooper()).postDelayed({
+                android.util.Log.d("MainActivity", "Retrying P2P download after error (attempt $downloadRetryCount)")
+                startBackgroundTorrentDownload()
+            }, 10000)
+        } else {
+            android.util.Log.w("MainActivity", "P2P download failed after $MAX_DOWNLOAD_RETRIES attempts")
+            peerCountTextView.text = "Torrent: Download failed - $error"
+            downloadRetryCount = 0 // Reset for future attempts
+        }
     }
     
     override fun onTimeout() {
-        android.util.Log.w("MainActivity", "Background P2P download timed out")
+        android.util.Log.w("MainActivity", "Background P2P download timed out (attempt ${downloadRetryCount + 1}/$MAX_DOWNLOAD_RETRIES)")
         isBackgroundDownloading = false
         
-        peerCountTextView.text = "Torrent: P2P download timed out - no peers found"
-        
-        // Don't fallback to HTTPS - keep torrent-only
-        android.util.Log.d("MainActivity", "P2P download timed out, staying torrent-only")
+        if (downloadRetryCount < MAX_DOWNLOAD_RETRIES) {
+            downloadRetryCount++
+            peerCountTextView.text = "Torrent: No peers found, retrying... (${downloadRetryCount}/$MAX_DOWNLOAD_RETRIES)"
+            
+            // Retry after 10 seconds
+            Handler(Looper.getMainLooper()).postDelayed({
+                android.util.Log.d("MainActivity", "Retrying P2P download (attempt $downloadRetryCount)")
+                startBackgroundTorrentDownload()
+            }, 10000)
+        } else {
+            android.util.Log.w("MainActivity", "P2P download failed after $MAX_DOWNLOAD_RETRIES attempts")
+            peerCountTextView.text = "Torrent: Download failed - no peers available"
+            downloadRetryCount = 0 // Reset for future attempts
+        }
     }
 
     override fun onVerifying(progress: Float) {
