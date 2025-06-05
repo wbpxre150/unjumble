@@ -23,6 +23,8 @@ class TorrentManager private constructor(private val context: Context) {
     private var zeroPeerStartTime: Long = 0
     private var hasHadPeers = false
     private var isVerifying = false
+    private var verificationStartTime: Long = 0
+    private val VERIFICATION_TIMEOUT_MS = 120000L // 2 minutes timeout for verification
     
     companion object {
         private const val TAG = "TorrentManager"
@@ -139,8 +141,8 @@ class TorrentManager private constructor(private val context: Context) {
                         
                         Log.d(TAG, "Torrent added to session, waiting for metadata and peers...")
                         
-                        // Start verification first
-                        startVerification(listener)
+                        // Skip verification during download - only verify for seeding
+                        Log.d(TAG, "Skipping verification during download to prevent conflicts")
                         
                         // Start monitoring for metadata and peer discovery
                         startMetadataAndPeerMonitoring(listener)
@@ -230,6 +232,7 @@ class TorrentManager private constructor(private val context: Context) {
             }
             
             isVerifying = true
+            verificationStartTime = System.currentTimeMillis()
             Log.d(TAG, "Starting torrent verification...")
             
             // Force verification of pieces
@@ -242,8 +245,19 @@ class TorrentManager private constructor(private val context: Context) {
                         val status = handle.status()
                         val verifyProgress = status.progress()
                         val state = status.state()
+                        val currentTime = System.currentTimeMillis()
                         
                         Log.d(TAG, "Verification progress: ${(verifyProgress * 100).toInt()}%, state: $state")
+                        
+                        // Check verification timeout
+                        if (currentTime - verificationStartTime > VERIFICATION_TIMEOUT_MS) {
+                            Log.w(TAG, "Verification timeout after ${VERIFICATION_TIMEOUT_MS}ms - forcing completion")
+                            isVerifying = false
+                            handler.post {
+                                listener.onProgress(0, 0, 0, 0)
+                            }
+                            break
+                        }
                         
                         // Update verification progress
                         handler.post {
@@ -286,6 +300,7 @@ class TorrentManager private constructor(private val context: Context) {
             }
             
             isVerifying = true
+            verificationStartTime = System.currentTimeMillis()
             Log.d(TAG, "Starting torrent verification for seeding...")
             
             // Force verification of pieces
@@ -298,8 +313,17 @@ class TorrentManager private constructor(private val context: Context) {
                         val status = handle.status()
                         val verifyProgress = status.progress()
                         val state = status.state()
+                        val currentTime = System.currentTimeMillis()
                         
                         Log.d(TAG, "Seeding verification progress: ${(verifyProgress * 100).toInt()}%, state: $state")
+                        
+                        // Check verification timeout for seeding
+                        if (currentTime - verificationStartTime > VERIFICATION_TIMEOUT_MS) {
+                            Log.w(TAG, "Seeding verification timeout after ${VERIFICATION_TIMEOUT_MS}ms - assuming complete")
+                            isVerifying = false
+                            isSeeding = true
+                            break
+                        }
                         
                         // Update verification progress if listener is available
                         listener?.let {
@@ -354,13 +378,31 @@ class TorrentManager private constructor(private val context: Context) {
                         break
                     }
                     
-                    // Check if download is complete
-                    if (status.isFinished || (totalWanted > 0 && totalWantedDone >= totalWanted)) {
+                    // Enhanced completion detection
+                    val state = status.state()
+                    val isComplete = status.isFinished || 
+                                   (totalWanted > 0 && totalWantedDone >= totalWanted) ||
+                                   state == TorrentStatus.State.SEEDING ||
+                                   (state == TorrentStatus.State.CHECKING_FILES && status.progress() >= 1.0f)
+                    
+                    Log.d(TAG, "Completion check: isFinished=${status.isFinished}, progress=${status.progress()}, state=$state, totalDone/Wanted=$totalWantedDone/$totalWanted")
+                    
+                    if (isComplete) {
+                        Log.d(TAG, "Download completed - state: $state, progress: ${status.progress()}")
                         handler.post {
                             downloadListener?.onCompleted(currentDownloadPath)
                         }
                         isDownloading = false
                         break
+                    }
+                    
+                    // Handle verification phase progress
+                    if (state == TorrentStatus.State.CHECKING_FILES) {
+                        val verifyProgress = status.progress()
+                        Log.d(TAG, "In verification phase: ${(verifyProgress * 100).toInt()}%")
+                        handler.post {
+                            downloadListener?.onVerifying(verifyProgress)
+                        }
                     }
                     
                     // Basic error checking
