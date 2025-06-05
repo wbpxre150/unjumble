@@ -53,7 +53,7 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
 
     private fun startP2PDownload() {
         statusTextView.text = "Initializing P2P download..."
-        timeRemainingTextView.text = "Checking LibTorrent4j availability..."
+        timeRemainingTextView.text = "Starting P2P download..."
         
         val magnetLink = getString(R.string.pictures_magnet_link)
         val downloadPath = File(cacheDir, "pictures.tar.gz").absolutePath
@@ -61,17 +61,6 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         // Store magnet link for future seeding sessions
         val prefs = getSharedPreferences("torrent_prefs", MODE_PRIVATE)
         prefs.edit().putString("magnet_link", magnetLink).apply()
-        
-        // Check if LibTorrent is available before attempting download
-        if (!torrentManager.isLibraryLoaded()) {
-            statusTextView.text = "P2P library not available"
-            timeRemainingTextView.text = "Switching to direct download..."
-            GlobalScope.launch(Dispatchers.Main) {
-                delay(2000) // Give user time to read the message
-                fallbackToHttpsDownload()
-            }
-            return
-        }
         
         statusTextView.text = "Starting P2P download..."
         timeRemainingTextView.text = "Connecting to DHT network..."
@@ -107,6 +96,10 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
     }
 
     override fun onCompleted(filePath: String) {
+        if (isP2PAttemptFinished) {
+            android.util.Log.d("DownloadActivity", "P2P attempt already finished, ignoring completion")
+            return
+        }
         isP2PAttemptFinished = true
         GlobalScope.launch(Dispatchers.Main) {
             try {
@@ -121,6 +114,10 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
     }
 
     override fun onError(error: String) {
+        if (isP2PAttemptFinished) {
+            android.util.Log.d("DownloadActivity", "P2P attempt already finished, ignoring error: $error")
+            return
+        }
         isP2PAttemptFinished = true
         android.util.Log.w("DownloadActivity", "P2P download failed: $error")
         GlobalScope.launch(Dispatchers.Main) {
@@ -129,6 +126,10 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
     }
 
     override fun onTimeout() {
+        if (isP2PAttemptFinished) {
+            android.util.Log.d("DownloadActivity", "P2P attempt already finished, ignoring timeout")
+            return
+        }
         isP2PAttemptFinished = true
         android.util.Log.w("DownloadActivity", "P2P download timed out")
         GlobalScope.launch(Dispatchers.Main) {

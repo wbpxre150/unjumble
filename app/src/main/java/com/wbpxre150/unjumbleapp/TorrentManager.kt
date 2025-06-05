@@ -26,7 +26,7 @@ class TorrentManager private constructor(private val context: Context) {
     
     companion object {
         private const val TAG = "TorrentManager"
-        private const val ZERO_PEER_TIMEOUT_MS = 180000L // 3 minutes with zero peers before fallback
+        private const val ZERO_PEER_TIMEOUT_MS = 300000L // 5 minutes with zero peers before timeout
         
         @Volatile
         private var INSTANCE: TorrentManager? = null
@@ -96,9 +96,9 @@ class TorrentManager private constructor(private val context: Context) {
     
     private fun continueDownloadAfterInit(magnetLink: String, downloadPath: String, listener: TorrentDownloadListener) {
         if (!isLibraryAvailable || sessionManager == null) {
-            Log.d(TAG, "LibTorrent not available - immediately falling back to HTTPS")
+            Log.d(TAG, "LibTorrent not available - calling onError to trigger fallback")
             isDownloading = false
-            listener.onTimeout()
+            listener.onError("P2P library not available")
             return
         }
         
@@ -110,38 +110,52 @@ class TorrentManager private constructor(private val context: Context) {
             
             Log.d(TAG, "Starting P2P download for: $magnetLink")
             
-            // Add torrent from magnet link using fetchMagnet
-            Log.d(TAG, "Fetching magnet metadata...")
-            val data = sessionManager?.fetchMagnet(magnetLink, 30, downloadDir ?: File(currentDownloadPath))
-            
-            if (data != null) {
-                val torrentInfo = TorrentInfo.bdecode(data)
-                Log.d(TAG, "Magnet metadata downloaded successfully, starting verification before download...")
-                
-                // Add torrent to session
-                sessionManager?.download(torrentInfo, downloadDir ?: File(currentDownloadPath))
-                currentTorrentHandle = sessionManager?.find(torrentInfo.infoHash())
-                
-                // Start verification first
-                startVerification(listener)
-            } else {
-                listener.onError("Failed to fetch magnet metadata")
-                isDownloading = false
-                return
-            }
-            
-            if (currentTorrentHandle == null) {
-                listener.onError("Failed to add torrent to session")
-                isDownloading = false
-                return
-            }
-            
-            Log.d(TAG, "Torrent added to session, waiting for metadata and peers...")
-            
-            // Start monitoring for metadata and peer discovery
-            startMetadataAndPeerMonitoring(listener)
-            
-            // Timeout is already set in downloadFile(), no need to set it again here
+            // Fetch magnet metadata asynchronously to avoid blocking
+            Thread {
+                try {
+                    Log.d(TAG, "Fetching magnet metadata...")
+                    val data = sessionManager?.fetchMagnet(magnetLink, 120, downloadDir ?: File(currentDownloadPath))
+                    
+                    if (data != null) {
+                        val torrentInfo = TorrentInfo.bdecode(data)
+                        Log.d(TAG, "Magnet metadata downloaded successfully, starting verification before download...")
+                        
+                        // Add torrent to session
+                        sessionManager?.download(torrentInfo, downloadDir ?: File(currentDownloadPath))
+                        currentTorrentHandle = sessionManager?.find(torrentInfo.infoHash())
+                        
+                        if (currentTorrentHandle == null) {
+                            handler.post {
+                                listener.onError("Failed to add torrent to session")
+                            }
+                            isDownloading = false
+                            return@Thread
+                        }
+                        
+                        Log.d(TAG, "Torrent added to session, waiting for metadata and peers...")
+                        
+                        // Start verification first
+                        startVerification(listener)
+                        
+                        // Start monitoring for metadata and peer discovery
+                        startMetadataAndPeerMonitoring(listener)
+                        
+                    } else {
+                        Log.w(TAG, "Failed to fetch magnet metadata - this may be due to network issues or no available peers")
+                        handler.post {
+                            listener.onError("Failed to fetch magnet metadata")
+                        }
+                        isDownloading = false
+                    }
+                    
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed during magnet metadata fetch", e)
+                    handler.post {
+                        listener.onError("Failed to start P2P download: ${e.message}")
+                    }
+                    isDownloading = false
+                }
+            }.start()
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start P2P download", e)
@@ -394,7 +408,7 @@ class TorrentManager private constructor(private val context: Context) {
         // If we've had peers before but now have zero, and it's been too long, timeout
         // OR if we've never had peers and it's been too long, timeout
         if (zeroPeerDuration > ZERO_PEER_TIMEOUT_MS) {
-            Log.d(TAG, "Zero peers for ${zeroPeerDuration}ms, falling back to HTTPS")
+            Log.d(TAG, "Zero peers for ${zeroPeerDuration}ms, timing out P2P download")
             handler.post {
                 listener.onTimeout()
             }
