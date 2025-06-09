@@ -64,18 +64,13 @@ class TorrentManager private constructor(private val context: Context) {
             settingsPack.setBoolean(settings_pack.bool_types.enable_natpmp.swigValue(), true)
             settingsPack.setInteger(settings_pack.int_types.listen_queue_size.swigValue(), 50)
             
-            // Use dynamic port allocation - try random ports in ephemeral range
-            val dynamicPorts = generateDynamicPorts()
-            val listenInterfaces = dynamicPorts.joinToString(",") { port ->
-                "0.0.0.0:$port,[::]:$port"
-            }
-            settingsPack.setString(settings_pack.string_types.listen_interfaces.swigValue(), listenInterfaces)
+            settingsPack.setString(settings_pack.string_types.listen_interfaces.swigValue(), "0.0.0.0:6881,[::]:6881")
             
             sessionManager?.applySettings(settingsPack)
             sessionManager?.start()
             
             isLibraryAvailable = true
-            Log.d(TAG, "LibTorrent4j session initialized successfully with dynamic ports: $dynamicPorts")
+            Log.d(TAG, "LibTorrent4j session initialized successfully with peer discovery")
             
         } catch (e: UnsatisfiedLinkError) {
             Log.w(TAG, "LibTorrent4j native library not available: ${e.message}")
@@ -85,14 +80,6 @@ class TorrentManager private constructor(private val context: Context) {
             isLibraryAvailable = false
         }
     }
-    
-    private fun generateDynamicPorts(): List<Int> {
-        // Use ephemeral port range (49152-65535) which carriers are less likely to block
-        // Try 3 random ports to increase chances of success
-        val portRange = 49152..65535
-        return (1..3).map { portRange.random() }.distinct()
-    }
-    
     
     fun downloadFile(magnetLink: String, downloadPath: String, listener: TorrentDownloadListener) {
         if (isDownloading) {
