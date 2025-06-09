@@ -60,6 +60,7 @@ class MainActivity : Activity(), TorrentDownloadListener {
     private var isBackgroundDownloading = false
     private var isSeedingInitializing = false
     private var downloadRetryCount = 0
+    private val networkManager = NetworkManager.getInstance(this)
     
     companion object {
         // Expected SHA-256 hash of the correct pictures.tar.gz file
@@ -218,8 +219,13 @@ class MainActivity : Activity(), TorrentDownloadListener {
                 android.util.Log.d("MainActivity", "No torrent file found, starting background download")
                 peerCountTextView.text = "Torrent: No archive file, downloading..."
             }
-            // Pictures are extracted but no valid archive for seeding - start background torrent download
-            startBackgroundTorrentDownload()
+            // Pictures are extracted but no valid archive for seeding - start background torrent download only if on WiFi
+            if (networkManager.isOnWiFi()) {
+                startBackgroundTorrentDownload()
+            } else {
+                android.util.Log.d("MainActivity", "Not on WiFi - skipping background torrent download")
+                peerCountTextView.text = "Torrent: Connect to WiFi for P2P downloads"
+            }
         }
         
         updateScoreAndLevel()
@@ -872,16 +878,19 @@ class MainActivity : Activity(), TorrentDownloadListener {
                 !isLibraryLoaded -> {
                     peerCountTextView.text = "Torrent: Library not available"
                 }
+                networkManager.isOnMobileData() -> {
+                    peerCountTextView.text = "Torrent: Mobile data - P2P disabled"
+                }
                 File(cacheDir, "pictures.tar.gz").exists() -> {
                     val downloadFile = File(cacheDir, "pictures.tar.gz")
                     if (verifyFileHash(downloadFile)) {
                         peerCountTextView.text = "Torrent: Valid file exists, initializing seeding..."
                     } else {
-                        peerCountTextView.text = "Torrent: File corrupted, will re-download..."
+                        peerCountTextView.text = "Torrent: File corrupted, will re-download when on WiFi"
                     }
                 }
                 else -> {
-                    peerCountTextView.text = "Torrent: No archive file - downloading in background"
+                    peerCountTextView.text = "Torrent: No archive file - will download on WiFi"
                 }
             }
         } catch (e: Exception) {
@@ -894,6 +903,13 @@ class MainActivity : Activity(), TorrentDownloadListener {
         // Only start if not already downloading
         if (isBackgroundDownloading) {
             android.util.Log.d("MainActivity", "Background download already in progress")
+            return
+        }
+        
+        // Check if on mobile data - if so, don't start torrent download
+        if (networkManager.isOnMobileData()) {
+            android.util.Log.d("MainActivity", "On mobile data - DHT discovery doesn't work, skipping torrent download")
+            peerCountTextView.text = "Torrent: Mobile data detected - P2P downloads disabled"
             return
         }
         

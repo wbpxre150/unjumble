@@ -25,6 +25,7 @@ class TorrentManager private constructor(private val context: Context) {
     private var isVerifying = false
     private var verificationStartTime: Long = 0
     private val VERIFICATION_TIMEOUT_MS = 120000L // 2 minutes timeout for verification
+    private val networkManager = NetworkManager.getInstance(context)
     
     companion object {
         private const val TAG = "TorrentManager"
@@ -43,6 +44,8 @@ class TorrentManager private constructor(private val context: Context) {
     init {
         // Initialize LibTorrent4j immediately when TorrentManager singleton is created
         initializeSession()
+        // Start network monitoring to handle dynamic seeding control
+        startNetworkMonitoring()
     }
     
     private fun initializeSession() {
@@ -60,13 +63,19 @@ class TorrentManager private constructor(private val context: Context) {
             settingsPack.setBoolean(settings_pack.bool_types.enable_upnp.swigValue(), true)
             settingsPack.setBoolean(settings_pack.bool_types.enable_natpmp.swigValue(), true)
             settingsPack.setInteger(settings_pack.int_types.listen_queue_size.swigValue(), 50)
-            settingsPack.setString(settings_pack.string_types.listen_interfaces.swigValue(), "0.0.0.0:6881,[::]:6881")
+            
+            // Use dynamic port allocation - try random ports in ephemeral range
+            val dynamicPorts = generateDynamicPorts()
+            val listenInterfaces = dynamicPorts.joinToString(",") { port ->
+                "0.0.0.0:$port,[::]:$port"
+            }
+            settingsPack.setString(settings_pack.string_types.listen_interfaces.swigValue(), listenInterfaces)
             
             sessionManager?.applySettings(settingsPack)
             sessionManager?.start()
             
             isLibraryAvailable = true
-            Log.d(TAG, "LibTorrent4j session initialized successfully with peer discovery")
+            Log.d(TAG, "LibTorrent4j session initialized successfully with dynamic ports: $dynamicPorts")
             
         } catch (e: UnsatisfiedLinkError) {
             Log.w(TAG, "LibTorrent4j native library not available: ${e.message}")
@@ -75,6 +84,13 @@ class TorrentManager private constructor(private val context: Context) {
             Log.w(TAG, "Failed to initialize LibTorrent session: ${e.message}")
             isLibraryAvailable = false
         }
+    }
+    
+    private fun generateDynamicPorts(): List<Int> {
+        // Use ephemeral port range (49152-65535) which carriers are less likely to block
+        // Try 3 random ports to increase chances of success
+        val portRange = 49152..65535
+        return (1..3).map { portRange.random() }.distinct()
     }
     
     
@@ -706,7 +722,35 @@ class TorrentManager private constructor(private val context: Context) {
     
     private fun shouldSeed(): Boolean {
         val prefs = context.getSharedPreferences("torrent_prefs", Context.MODE_PRIVATE)
-        return prefs.getBoolean("enable_seeding", true)
+        val seedingEnabled = prefs.getBoolean("enable_seeding", true)
+        val allowMobileDataSeeding = prefs.getBoolean("allow_mobile_data_seeding", false)
+        
+        if (!seedingEnabled) {
+            Log.d(TAG, "Seeding disabled by user preference")
+            return false
+        }
+        
+        val isOnWiFi = networkManager.isOnWiFi()
+        val isOnMobileData = networkManager.isOnMobileData()
+        
+        return when {
+            isOnWiFi -> {
+                Log.d(TAG, "On WiFi - seeding allowed")
+                true
+            }
+            isOnMobileData && allowMobileDataSeeding -> {
+                Log.d(TAG, "On mobile data but user allows mobile data seeding")
+                true
+            }
+            isOnMobileData -> {
+                Log.d(TAG, "On mobile data and mobile data seeding disabled - blocking seeding")
+                false
+            }
+            else -> {
+                Log.d(TAG, "Unknown network type - allowing seeding")
+                true
+            }
+        }
     }
     
     fun setSeedingEnabled(enabled: Boolean) {
@@ -718,6 +762,21 @@ class TorrentManager private constructor(private val context: Context) {
         }
     }
     
+    fun setMobileDataSeedingEnabled(enabled: Boolean) {
+        val prefs = context.getSharedPreferences("torrent_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("allow_mobile_data_seeding", enabled).apply()
+        
+        if (!enabled && networkManager.isOnMobileData()) {
+            Log.d(TAG, "Mobile data seeding disabled and currently on mobile data - stopping seeding")
+            stopSeeding()
+        }
+    }
+    
+    fun isMobileDataSeedingEnabled(): Boolean {
+        val prefs = context.getSharedPreferences("torrent_prefs", Context.MODE_PRIVATE)
+        return prefs.getBoolean("allow_mobile_data_seeding", false)
+    }
+    
     fun isSeedingEnabled(): Boolean {
         val prefs = context.getSharedPreferences("torrent_prefs", Context.MODE_PRIVATE)
         return prefs.getBoolean("enable_seeding", true)
@@ -727,9 +786,27 @@ class TorrentManager private constructor(private val context: Context) {
         return isLibraryAvailable
     }
     
+    private fun startNetworkMonitoring() {
+        networkManager.startNetworkMonitoring { isOnWiFi ->
+            Log.d(TAG, "Network change detected - WiFi: $isOnWiFi")
+            
+            if (isSeeding && !isOnWiFi && networkManager.isOnMobileData() && !isMobileDataSeedingEnabled()) {
+                Log.d(TAG, "Switched to mobile data and mobile data seeding is disabled - stopping seeding")
+                stopSeeding()
+            } else if (!isSeeding && isOnWiFi && isSeedingEnabled()) {
+                Log.d(TAG, "Switched to WiFi and seeding is enabled - attempting to resume seeding")
+                // Try to resume seeding if we have a valid file
+                if (currentDownloadPath.isNotEmpty() && File(currentDownloadPath).exists()) {
+                    seedFile(currentDownloadPath)
+                }
+            }
+        }
+    }
+    
     fun shutdown() {
         stopDownload()
         stopSeeding()
+        networkManager.stopNetworkMonitoring()
         sessionManager?.stop()
         sessionManager = null
     }
