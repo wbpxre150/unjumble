@@ -46,9 +46,9 @@ Builds:
       - update-java-alternatives -a
     gradle:
       - yes
-  - versionName: 5.0
-    versionCode: 5
-    commit: v5
+  - versionName: 6.0
+    versionCode: 6
+    commit: v6
     subdir: app
     sudo:
       - apt-get update
@@ -56,11 +56,10 @@ Builds:
       - update-java-alternatives -a
     gradle:
       - yes
-    
 
 AllowedAPKSigningKeys: 480b18292c6be43e3829199c4d6a169b773862144fed576c303f634c4e146ec5
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags
-CurrentVersion: 5.0
-CurrentVersionCode: 5
+CurrentVersion: 6.0
+CurrentVersionCode: 6
