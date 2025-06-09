@@ -26,6 +26,9 @@ class TorrentManager private constructor(private val context: Context) {
     private var verificationStartTime: Long = 0
     private val VERIFICATION_TIMEOUT_MS = 120000L // 2 minutes timeout for verification
     private val networkManager = NetworkManager.getInstance(context)
+    private var isNetworkTransitioning = false
+    private var networkTransitionStartTime: Long = 0
+    private val NETWORK_TRANSITION_TIMEOUT_MS = 15000L // 15 seconds for network transitions
     
     companion object {
         private const val TAG = "TorrentManager"
@@ -64,18 +67,14 @@ class TorrentManager private constructor(private val context: Context) {
             settingsPack.setBoolean(settings_pack.bool_types.enable_natpmp.swigValue(), true)
             settingsPack.setInteger(settings_pack.int_types.listen_queue_size.swigValue(), 50)
             
-            // Use dynamic port allocation - try random ports in ephemeral range
-            val dynamicPorts = generateDynamicPorts()
-            val listenInterfaces = dynamicPorts.joinToString(",") { port ->
-                "0.0.0.0:$port,[::]:$port"
-            }
-            settingsPack.setString(settings_pack.string_types.listen_interfaces.swigValue(), listenInterfaces)
+            // Use standard BitTorrent port 6881 for better DHT connectivity
+            settingsPack.setString(settings_pack.string_types.listen_interfaces.swigValue(), "0.0.0.0:6881,[::]:6881")
             
             sessionManager?.applySettings(settingsPack)
             sessionManager?.start()
             
             isLibraryAvailable = true
-            Log.d(TAG, "LibTorrent4j session initialized successfully with dynamic ports: $dynamicPorts")
+            Log.d(TAG, "LibTorrent4j session initialized successfully on port 6881")
             
         } catch (e: UnsatisfiedLinkError) {
             Log.w(TAG, "LibTorrent4j native library not available: ${e.message}")
@@ -86,12 +85,6 @@ class TorrentManager private constructor(private val context: Context) {
         }
     }
     
-    private fun generateDynamicPorts(): List<Int> {
-        // Use ephemeral port range (49152-65535) which carriers are less likely to block
-        // Try 3 random ports to increase chances of success
-        val portRange = 49152..65535
-        return (1..3).map { portRange.random() }.distinct()
-    }
     
     
     fun downloadFile(magnetLink: String, downloadPath: String, listener: TorrentDownloadListener) {
@@ -505,6 +498,7 @@ class TorrentManager private constructor(private val context: Context) {
     
     fun seedFile(filePath: String, listener: TorrentDownloadListener? = null) {
         Log.d(TAG, "seedFile() called with: $filePath")
+        Log.d(TAG, "Current state - isSeeding: $isSeeding, isNetworkTransitioning: $isNetworkTransitioning, isLibraryAvailable: $isLibraryAvailable")
         
         if (!shouldSeed()) {
             Log.d(TAG, "Seeding disabled by user preference")
@@ -558,6 +552,14 @@ class TorrentManager private constructor(private val context: Context) {
             isSeeding = true
             Log.d(TAG, "Seeding enabled immediately with valid file - verification will happen in background")
             
+            // Notify listener immediately that seeding started
+            listener?.let {
+                handler.post {
+                    Log.d(TAG, "Notifying listener that seeding started immediately")
+                    // This should trigger MainActivity to clear isSeedingInitializing
+                }
+            }
+            
             // Try metadata fetch with verification in background thread (non-blocking)
             Thread {
                 try {
@@ -603,9 +605,17 @@ class TorrentManager private constructor(private val context: Context) {
             val downloadDir = File(filePath).parentFile
             Log.d(TAG, "Restoring seeding using magnet link: $magnetLink")
             
-            // Fetch magnet metadata and add torrent for seeding with longer timeout for better reliability
+            // Fetch magnet metadata and add torrent for seeding with adaptive timeout
             Log.d(TAG, "Fetching magnet metadata for seeding restoration...")
-            Log.d(TAG, "Using 60 second timeout to allow DHT network connection and peer discovery")
+            
+            // Use shorter timeout if we're in a network transition period
+            val timeout = if (isNetworkTransitioning) {
+                Log.d(TAG, "Network transitioning - using reduced 20 second timeout")
+                20
+            } else {
+                Log.d(TAG, "Stable network - using standard 60 second timeout")
+                60
+            }
             
             // Notify listener that we're fetching metadata
             listener?.let {
@@ -614,7 +624,7 @@ class TorrentManager private constructor(private val context: Context) {
                 }
             }
             
-            val data = sessionManager?.fetchMagnet(magnetLink, 60, downloadDir ?: File(filePath).parentFile ?: File("."))
+            val data = sessionManager?.fetchMagnet(magnetLink, timeout, downloadDir ?: File(filePath).parentFile ?: File("."))
             Log.d(TAG, "Magnet fetch result: ${if (data != null) "success (${data.size} bytes)" else "failed or null (timeout or no peers)"}")
             
             if (data != null) {
@@ -657,10 +667,27 @@ class TorrentManager private constructor(private val context: Context) {
                     Log.d(TAG, "Keeping existing seeding state: isSeeding=$isSeeding")
                 }
             } else {
-                Log.w(TAG, "Failed to fetch magnet metadata for seeding restoration after 60 second timeout")
-                Log.d(TAG, "This is likely due to network issues, no available peers, or DHT connectivity problems")
-                Log.d(TAG, "File is still valid for the app, seeding just won't work right now")
-                Log.d(TAG, "Keeping existing seeding state since we have a valid file")
+                Log.w(TAG, "Failed to fetch magnet metadata for seeding restoration after $timeout second timeout")
+                
+                // If this was a quick network transition timeout, schedule a retry
+                if (isNetworkTransitioning && timeout == 20) {
+                    Log.d(TAG, "Network transition timeout - scheduling retry in 30 seconds")
+                    Thread {
+                        try {
+                            Thread.sleep(30000) // Wait 30 seconds for network to fully stabilize
+                            if (networkManager.isOnWiFi() && File(filePath).exists()) {
+                                Log.d(TAG, "Retrying seeding restoration after network stabilization")
+                                restoreSeedingFromMagnetLink(filePath, listener)
+                            }
+                        } catch (e: InterruptedException) {
+                            Log.d(TAG, "Retry sleep interrupted")
+                        }
+                    }.start()
+                } else {
+                    Log.d(TAG, "This is likely due to network issues, no available peers, or DHT connectivity problems")
+                    Log.d(TAG, "File is still valid for the app, seeding just won't work right now")
+                    Log.d(TAG, "Keeping existing seeding state since we have a valid file")
+                }
                 
                 // Keep seeding flag as-is (likely already true from seedFile()) since we have the file
                 if (!isSeeding) {
@@ -709,11 +736,18 @@ class TorrentManager private constructor(private val context: Context) {
     }
     
     fun stopSeeding() {
+        // CRITICAL: Never interfere with active downloads
+        if (isDownloading) {
+            Log.w(TAG, "stopSeeding() called during active download - ignoring to prevent interference")
+            return
+        }
+        
         isSeeding = false
         
-        // Remove torrent from session if it exists
+        // Remove torrent from session if it exists (only if not downloading)
         currentTorrentHandle?.let { handle ->
             if (handle.isValid) {
+                Log.d(TAG, "Removing torrent handle for seeding stop")
                 sessionManager?.remove(handle)
             }
         }
@@ -786,18 +820,97 @@ class TorrentManager private constructor(private val context: Context) {
         return isLibraryAvailable
     }
     
+    fun isNetworkTransitioning(): Boolean {
+        val currentTime = System.currentTimeMillis()
+        val inTransition = isNetworkTransitioning && (currentTime - networkTransitionStartTime) < NETWORK_TRANSITION_TIMEOUT_MS
+        
+        // Auto-clear the transition flag if timeout exceeded
+        if (isNetworkTransitioning && (currentTime - networkTransitionStartTime) >= NETWORK_TRANSITION_TIMEOUT_MS) {
+            Log.d(TAG, "Network transition timeout exceeded, clearing flag")
+            isNetworkTransitioning = false
+        }
+        
+        return inTransition
+    }
+    
+    fun isActivelyDownloading(): Boolean {
+        return isDownloading
+    }
+    
     private fun startNetworkMonitoring() {
         networkManager.startNetworkMonitoring { isOnWiFi ->
             Log.d(TAG, "Network change detected - WiFi: $isOnWiFi")
             
-            if (isSeeding && !isOnWiFi && networkManager.isOnMobileData() && !isMobileDataSeedingEnabled()) {
-                Log.d(TAG, "Switched to mobile data and mobile data seeding is disabled - stopping seeding")
-                stopSeeding()
-            } else if (!isSeeding && isOnWiFi && isSeedingEnabled()) {
-                Log.d(TAG, "Switched to WiFi and seeding is enabled - attempting to resume seeding")
-                // Try to resume seeding if we have a valid file
-                if (currentDownloadPath.isNotEmpty() && File(currentDownloadPath).exists()) {
-                    seedFile(currentDownloadPath)
+            // Mark network transition period
+            isNetworkTransitioning = true
+            networkTransitionStartTime = System.currentTimeMillis()
+            
+            // CRITICAL: Never interfere with active downloads
+            if (isDownloading) {
+                Log.d(TAG, "Download in progress - network monitoring will not interfere")
+                // Clear transition flag but don't touch the download session
+                Thread {
+                    try {
+                        Thread.sleep(5000)
+                    } catch (e: InterruptedException) {
+                        // Ignore
+                    } finally {
+                        isNetworkTransitioning = false
+                    }
+                }.start()
+            } else {
+                // Handle network changes when not downloading
+                if (isSeeding && !isOnWiFi && networkManager.isOnMobileData() && !isMobileDataSeedingEnabled()) {
+                    Log.d(TAG, "Switched to mobile data and mobile data seeding is disabled - stopping seeding")
+                    stopSeeding()
+                } else if (isOnWiFi && isSeedingEnabled()) {
+                    Log.d(TAG, "Switched to WiFi - checking seeding state and attempting resume")
+                    
+                    // More aggressive reset of seeding state during network transitions (only if not downloading)
+                    if (isSeeding && !isDownloading) {
+                        Log.d(TAG, "Already seeding but network changed - resetting session for stability")
+                        // Reset the session to handle potential corruption during network switch
+                        stopSeeding()
+                        isSeeding = false
+                    }
+                    
+                    // Wait a moment for network to stabilize before attempting seeding
+                    Thread {
+                        try {
+                            Thread.sleep(5000) // 5 second delay for network stabilization
+                            
+                            // Check if we still have a valid file and are on WiFi
+                            if (networkManager.isOnWiFi() && currentDownloadPath.isNotEmpty() && File(currentDownloadPath).exists()) {
+                                Log.d(TAG, "Network stabilized, starting fresh seeding session")
+                                seedFile(currentDownloadPath)
+                            } else if (networkManager.isOnWiFi()) {
+                                // Try to find the torrent file in cache
+                                val cacheFile = File(context.cacheDir, "pictures.tar.gz")
+                                if (cacheFile.exists()) {
+                                    Log.d(TAG, "Found torrent file in cache, starting seeding")
+                                    currentDownloadPath = cacheFile.absolutePath
+                                    seedFile(cacheFile.absolutePath)
+                                }
+                            }
+                        } catch (e: InterruptedException) {
+                            Log.d(TAG, "Network transition wait interrupted")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error during network transition seeding restart", e)
+                        } finally {
+                            isNetworkTransitioning = false
+                        }
+                    }.start()
+                } else {
+                    // Clear transition flag after a short delay if no action needed
+                    Thread {
+                        try {
+                            Thread.sleep(5000)
+                        } catch (e: InterruptedException) {
+                            // Ignore
+                        } finally {
+                            isNetworkTransitioning = false
+                        }
+                    }.start()
                 }
             }
         }

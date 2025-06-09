@@ -59,6 +59,7 @@ class MainActivity : Activity(), TorrentDownloadListener {
     private var peerUpdateRunnable: Runnable? = null
     private var isBackgroundDownloading = false
     private var isSeedingInitializing = false
+    private var seedingInitStartTime: Long = 0
     private var downloadRetryCount = 0
     private val networkManager = NetworkManager.getInstance(this)
     
@@ -128,6 +129,7 @@ class MainActivity : Activity(), TorrentDownloadListener {
             // Use the enhanced seedFile method that can restore from stored magnet link
             try {
                 isSeedingInitializing = true
+                seedingInitStartTime = System.currentTimeMillis()
                 peerCountTextView.text = "Torrent: Initializing seeding..."
                 android.util.Log.d("MainActivity", "Starting async seeding initiation")
                 
@@ -139,14 +141,20 @@ class MainActivity : Activity(), TorrentDownloadListener {
                         
                         // Check immediately after seedFile completes
                         withContext(Dispatchers.Main) {
-                            delay(1000) // Give it a moment to process
+                            delay(2000) // Give it a moment to process
                             val isSeeding = torrentManager?.isSeeding() ?: false
                             android.util.Log.d("MainActivity", "Immediate seeding check after seedFile: $isSeeding")
                             
+                            // Always clear the initializing flag after a reasonable delay
+                            // This prevents getting permanently stuck
+                            isSeedingInitializing = false
+                            
                             if (isSeeding) {
                                 android.util.Log.d("MainActivity", "Seeding started successfully immediately")
-                                isSeedingInitializing = false
                                 peerCountTextView.text = "Torrent: Seeding started successfully"
+                            } else {
+                                android.util.Log.d("MainActivity", "Seeding not active after initialization")
+                                peerCountTextView.text = "Torrent: Seeding initialization completed"
                             }
                         }
                     } catch (e: Exception) {
@@ -166,7 +174,8 @@ class MainActivity : Activity(), TorrentDownloadListener {
                         android.util.Log.d("MainActivity", "Quick check (3s): isSeedingInitializing=$isSeedingInitializing, isSeeding=$isSeeding")
                         if (isSeeding) {
                             android.util.Log.d("MainActivity", "Quick check: Seeding started successfully")
-                            checkSeedingInitialization()
+                            isSeedingInitializing = false
+                            peerCountTextView.text = "Torrent: Seeding active"
                         } else {
                             peerCountTextView.text = "Torrent: Fetching magnet metadata..."
                         }
@@ -174,15 +183,15 @@ class MainActivity : Activity(), TorrentDownloadListener {
                 }, 3000) // 3 second quick check
                 
                 Handler(Looper.getMainLooper()).postDelayed({
-                    // Medium check after 8 seconds
+                    // Medium check after 8 seconds - force clear if still stuck
                     if (isSeedingInitializing) {
                         val isSeeding = torrentManager?.isSeeding() ?: false
-                        android.util.Log.d("MainActivity", "Medium check (8s): isSeedingInitializing=$isSeedingInitializing, isSeeding=$isSeeding")
+                        android.util.Log.d("MainActivity", "Medium check (8s): Forcing clear of initialization flag")
+                        isSeedingInitializing = false // Force clear
                         if (isSeeding) {
-                            android.util.Log.d("MainActivity", "Medium check: Seeding started successfully")
-                            checkSeedingInitialization()
+                            peerCountTextView.text = "Torrent: Seeding active"
                         } else {
-                            peerCountTextView.text = "Torrent: Magnet restoration taking longer than expected..."
+                            peerCountTextView.text = "Torrent: Initialization completed"
                         }
                     }
                 }, 8000) // 8 second medium check
@@ -203,7 +212,7 @@ class MainActivity : Activity(), TorrentDownloadListener {
                 
                 Handler(Looper.getMainLooper()).postDelayed({
                     checkSeedingInitialization()
-                }, 25000) // 25 second final timeout to allow for magnet fetch
+                }, 20000) // 20 second timeout - reduced for better responsiveness during network transitions
                 
             } catch (e: Exception) {
                 android.util.Log.e("MainActivity", "Failed to start seeding: ${e.message}", e)
@@ -827,10 +836,41 @@ class MainActivity : Activity(), TorrentDownloadListener {
         peerUpdateRunnable = object : Runnable {
             override fun run() {
                 updatePeerCount()
+                
+                // Watchdog: Check for stuck states every update
+                checkForStuckStates()
+                
                 peerUpdateHandler.postDelayed(this, 5000) // Update every 5 seconds
             }
         }
         peerUpdateHandler.post(peerUpdateRunnable!!)
+    }
+    
+    private fun checkForStuckStates() {
+        try {
+            // CRITICAL: Never interfere with active downloads
+            if (isBackgroundDownloading || torrentManager?.isActivelyDownloading() == true) {
+                android.util.Log.d("MainActivity", "Watchdog: Download in progress, skipping all interference")
+                return
+            }
+            
+            // Check if we've been initializing seeding for too long (only if NOT downloading)
+            if (isSeedingInitializing) {
+                val currentTime = System.currentTimeMillis()
+                val initDuration = currentTime - seedingInitStartTime
+                
+                if (initDuration > 20000) { // 20 second watchdog
+                    android.util.Log.w("MainActivity", "Watchdog: Seeding stuck for ${initDuration}ms - clearing flag only")
+                    isSeedingInitializing = false
+                    
+                    // Only clear the flag, don't interfere with torrent manager during downloads
+                    android.util.Log.d("MainActivity", "Watchdog: Only clearing isSeedingInitializing flag, not touching torrent session")
+                    peerCountTextView.text = "Torrent: Initialization timeout cleared"
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Error in watchdog check", e)
+        }
     }
     
     private fun stopPeerCountUpdates() {
@@ -860,7 +900,26 @@ class MainActivity : Activity(), TorrentDownloadListener {
                     return
                 }
                 isSeedingInitializing -> {
-                    // Don't override seeding initialization display
+                    // CRITICAL: Never interfere with active downloads
+                    if (isBackgroundDownloading || torrentManager?.isActivelyDownloading() == true) {
+                        android.util.Log.d("MainActivity", "Download in progress - not interfering with seeding initialization")
+                        return
+                    }
+                    
+                    // Check if seeding initialization has been stuck too long (only if NOT downloading)
+                    val currentTime = System.currentTimeMillis()
+                    val initDuration = currentTime - seedingInitStartTime
+                    
+                    if (initDuration > 15000) { // Reduced to 15 seconds for faster recovery
+                        android.util.Log.w("MainActivity", "Seeding initialization stuck for ${initDuration}ms, clearing flag only")
+                        isSeedingInitializing = false
+                        
+                        // Only clear the flag during non-download periods
+                        android.util.Log.d("MainActivity", "Clearing isSeedingInitializing flag without touching torrent session")
+                        peerCountTextView.text = "Torrent: Initialization timeout cleared"
+                        return
+                    }
+                    // Don't override seeding initialization display if still within timeout
                     return
                 }
                 isSeeding && peerCount > 0 -> {
@@ -884,7 +943,12 @@ class MainActivity : Activity(), TorrentDownloadListener {
                 File(cacheDir, "pictures.tar.gz").exists() -> {
                     val downloadFile = File(cacheDir, "pictures.tar.gz")
                     if (verifyFileHash(downloadFile)) {
-                        peerCountTextView.text = "Torrent: Valid file exists, initializing seeding..."
+                        // Check if we're in a network transition - show appropriate message
+                        if (torrentManager?.isNetworkTransitioning() == true) {
+                            peerCountTextView.text = "Torrent: Network transitioning, seeding will resume..."
+                        } else {
+                            peerCountTextView.text = "Torrent: Valid file exists, initializing seeding..."
+                        }
                     } else {
                         peerCountTextView.text = "Torrent: File corrupted, will re-download when on WiFi"
                     }
@@ -943,6 +1007,7 @@ class MainActivity : Activity(), TorrentDownloadListener {
         // Try P2P download first
         val magnetLink = getString(R.string.pictures_magnet_link)
         android.util.Log.d("MainActivity", "Starting P2P download with magnet: ${magnetLink.take(50)}...")
+        android.util.Log.d("MainActivity", "Setting isBackgroundDownloading=true to protect from interference")
         peerCountTextView.text = "Torrent: Connecting to P2P network..."
         torrentManager?.downloadFile(magnetLink, downloadFile.absolutePath, this)
     }
@@ -967,6 +1032,7 @@ class MainActivity : Activity(), TorrentDownloadListener {
     
     override fun onCompleted(filePath: String) {
         android.util.Log.d("MainActivity", "Background P2P download completed: $filePath")
+        android.util.Log.d("MainActivity", "Setting isBackgroundDownloading=false - interference protection disabled")
         isBackgroundDownloading = false
         downloadRetryCount = 0 // Reset retry counter on success
         
@@ -987,6 +1053,7 @@ class MainActivity : Activity(), TorrentDownloadListener {
     
     override fun onError(error: String) {
         android.util.Log.w("MainActivity", "Background P2P download failed: $error (attempt ${downloadRetryCount + 1}/$MAX_DOWNLOAD_RETRIES)")
+        android.util.Log.d("MainActivity", "Setting isBackgroundDownloading=false due to error - interference protection disabled")
         isBackgroundDownloading = false
         
         if (downloadRetryCount < MAX_DOWNLOAD_RETRIES) {
@@ -1007,6 +1074,7 @@ class MainActivity : Activity(), TorrentDownloadListener {
     
     override fun onTimeout() {
         android.util.Log.w("MainActivity", "Background P2P download timed out (attempt ${downloadRetryCount + 1}/$MAX_DOWNLOAD_RETRIES)")
+        android.util.Log.d("MainActivity", "Setting isBackgroundDownloading=false due to timeout - interference protection disabled")
         isBackgroundDownloading = false
         
         if (downloadRetryCount < MAX_DOWNLOAD_RETRIES) {
