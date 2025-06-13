@@ -54,7 +54,7 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         timeRemainingTextView.text = "Starting P2P download..."
         
         val magnetLink = getString(R.string.pictures_magnet_link)
-        val downloadPath = File(cacheDir, "pictures.tar.gz").absolutePath
+        val downloadPath = File(filesDir, "pictures.tar.gz").absolutePath
         
         // Store magnet link for future seeding sessions
         val prefs = getSharedPreferences("torrent_prefs", MODE_PRIVATE)

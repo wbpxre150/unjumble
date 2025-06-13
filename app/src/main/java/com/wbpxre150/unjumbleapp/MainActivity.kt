@@ -119,8 +119,11 @@ class MainActivity : Activity(), TorrentDownloadListener {
         torrentManager = TorrentManager.getInstance(this)
         android.util.Log.d("MainActivity", "TorrentManager initialized, library loaded: ${torrentManager?.isLibraryLoaded()}")
         
+        // Migrate existing cache file to internal storage if it exists
+        migrateCacheFileToInternalStorage()
+        
         // Check for existing torrent file and verify its integrity with hash verification
-        val downloadedFile = File(cacheDir, "pictures.tar.gz")
+        val downloadedFile = File(filesDir, "pictures.tar.gz")
         android.util.Log.d("MainActivity", "Checking for torrent file: ${downloadedFile.absolutePath}, exists: ${downloadedFile.exists()}")
         
         if (verifyFileHash(downloadedFile)) {
@@ -940,8 +943,8 @@ class MainActivity : Activity(), TorrentDownloadListener {
                 networkManager.isOnMobileData() -> {
                     peerCountTextView.text = "Torrent: Mobile data - P2P disabled"
                 }
-                File(cacheDir, "pictures.tar.gz").exists() -> {
-                    val downloadFile = File(cacheDir, "pictures.tar.gz")
+                File(filesDir, "pictures.tar.gz").exists() -> {
+                    val downloadFile = File(filesDir, "pictures.tar.gz")
                     if (verifyFileHash(downloadFile)) {
                         // Check if we're in a network transition - show appropriate message
                         if (torrentManager?.isNetworkTransitioning() == true) {
@@ -981,7 +984,7 @@ class MainActivity : Activity(), TorrentDownloadListener {
         peerCountTextView.text = "Torrent: Starting background download..."
         isBackgroundDownloading = true
         
-        val downloadFile = File(cacheDir, "pictures.tar.gz")
+        val downloadFile = File(filesDir, "pictures.tar.gz")
         
         // Check if valid file already exists (race condition protection)
         if (verifyFileHash(downloadFile)) {
@@ -1124,7 +1127,7 @@ class MainActivity : Activity(), TorrentDownloadListener {
                 isSeedingInitializing = false
                 peerCountTextView.text = "Torrent: P2P library not available"
                 // Don't re-download if we have a valid file, just note that seeding isn't working
-                val downloadFile = File(cacheDir, "pictures.tar.gz")
+                val downloadFile = File(filesDir, "pictures.tar.gz")
                 if (!verifyFileHash(downloadFile)) {
                     android.util.Log.d("MainActivity", "No valid file and no P2P library - cannot download")
                     peerCountTextView.text = "Torrent: No file, P2P unavailable"
@@ -1133,7 +1136,7 @@ class MainActivity : Activity(), TorrentDownloadListener {
             else -> {
                 android.util.Log.w("MainActivity", "Seeding initialization timed out - checking file validity")
                 isSeedingInitializing = false
-                val downloadFile = File(cacheDir, "pictures.tar.gz")
+                val downloadFile = File(filesDir, "pictures.tar.gz")
                 
                 if (verifyFileHash(downloadFile)) {
                     android.util.Log.w("MainActivity", "File is valid but seeding failed - accepting gracefully")
@@ -1196,5 +1199,44 @@ class MainActivity : Activity(), TorrentDownloadListener {
         android.util.Log.d("MainActivity", "File hash verification: expected=$EXPECTED_FILE_HASH, actual=$actualHash, valid=$isValid")
         
         return isValid
+    }
+    
+    /**
+     * Migrate existing torrent file from cache directory to internal storage
+     */
+    private fun migrateCacheFileToInternalStorage() {
+        val cacheFile = File(cacheDir, "pictures.tar.gz")
+        val internalFile = File(filesDir, "pictures.tar.gz")
+        
+        // Only migrate if cache file exists and internal file doesn't
+        if (cacheFile.exists() && !internalFile.exists()) {
+            try {
+                android.util.Log.d("MainActivity", "Migrating torrent file from cache to internal storage")
+                
+                // Verify the cache file before migrating
+                if (verifyFileHash(cacheFile)) {
+                    android.util.Log.d("MainActivity", "Cache file is valid, copying to internal storage")
+                    cacheFile.copyTo(internalFile, overwrite = false)
+                    android.util.Log.d("MainActivity", "Migration successful, deleting cache file")
+                    cacheFile.delete()
+                    android.util.Log.d("MainActivity", "Torrent file migrated successfully (${internalFile.length()} bytes)")
+                } else {
+                    android.util.Log.w("MainActivity", "Cache file is corrupted, deleting instead of migrating")
+                    cacheFile.delete()
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("MainActivity", "Failed to migrate torrent file: ${e.message}", e)
+                // Clean up on error
+                try {
+                    if (internalFile.exists()) internalFile.delete()
+                } catch (cleanupError: Exception) {
+                    android.util.Log.e("MainActivity", "Failed to clean up after migration error", cleanupError)
+                }
+            }
+        } else if (cacheFile.exists() && internalFile.exists()) {
+            // Both files exist - remove the cache file since we now use internal storage
+            android.util.Log.d("MainActivity", "Both cache and internal torrent files exist, removing cache file")
+            cacheFile.delete()
+        }
     }
 }
