@@ -64,54 +64,75 @@ class TorrentManager private constructor(private val context: Context) {
     }
     
     private fun initializeSession() {
+        Log.d(TAG, "Starting jlibtorrent initialization...")
+        
         try {
-            // Try to load jlibtorrent
-            System.loadLibrary("jlibtorrent")
+            // Step 1: Try to load jlibtorrent native library
+            Log.d(TAG, "Step 1: Loading jlibtorrent native library...")
+            // Try the versioned library name first
+            try {
+                System.loadLibrary("jlibtorrent-1.2.0.18")
+                Log.d(TAG, "✓ Native library 'jlibtorrent-1.2.0.18' loaded successfully")
+            } catch (e: UnsatisfiedLinkError) {
+                Log.w(TAG, "Failed to load versioned library, trying generic name...")
+                System.loadLibrary("jlibtorrent")
+                Log.d(TAG, "✓ Native library 'jlibtorrent' loaded successfully")
+            }
             
-            // Initialize session manager with peer discovery settings
+            // Step 2: Initialize session manager
+            Log.d(TAG, "Step 2: Creating SessionManager...")
             sessionManager = SessionManager()
+            Log.d(TAG, "✓ SessionManager created successfully")
             
-            
-            // Configure session for optimal peer connectivity
+            // Step 3: Configure settings (simplified approach)
+            Log.d(TAG, "Step 3: Configuring session settings...")
             val settingsPack = SettingsPack()
+            Log.d(TAG, "✓ SettingsPack created successfully")
             
-            // Enable basic peer discovery methods (using simplified approach)
-            // Note: jlibtorrent 1.2.0.18 may have different method names
-            try {
-                settingsPack.connectionsLimit(100) // Basic connection limit setting
-            } catch (e: Exception) {
-                Log.w(TAG, "Could not set connections limit: ${e.message}")
-            }
+            // For now, skip settings configuration to test basic functionality
+            Log.d(TAG, "  Using default settings for initial testing")
             
-            // Dynamic port allocation - try multiple ports for better connectivity
-            var portBound = false
-            currentPort = 6881
+            // Step 4: Apply settings to session
+            Log.d(TAG, "Step 4: Applying settings to session...")
+            sessionManager?.applySettings(settingsPack)
+            Log.d(TAG, "✓ Settings applied successfully")
             
-            // Use default port binding approach for jlibtorrent
-            try {
-                sessionManager?.applySettings(settingsPack)
-                sessionManager?.start()
-                currentPort = 6881 // Use default port
-                portBound = true
-                Log.d(TAG, "jlibtorrent session started with default settings")
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to start jlibtorrent session: ${e.message}")
-                portBound = false
-            }
+            // Step 5: Start the session
+            Log.d(TAG, "Step 5: Starting jlibtorrent session...")
+            sessionManager?.start()
+            Log.d(TAG, "✓ Session started successfully")
             
+            currentPort = 6881 // Use default port
             isLibraryAvailable = true
-            Log.d(TAG, "jlibtorrent session initialized successfully on port $currentPort")
-            Log.d(TAG, "Peer settings: max_connections=100, max_peerlist=3000, reconnect_time=60s")
+            
+            Log.d(TAG, "🎉 jlibtorrent initialization completed successfully!")
+            Log.d(TAG, "   Library available: $isLibraryAvailable")
+            Log.d(TAG, "   Default port: $currentPort")
             
         } catch (e: UnsatisfiedLinkError) {
-            Log.w(TAG, "jlibtorrent native library not available: ${e.message}")
+            Log.e(TAG, "❌ NATIVE LIBRARY LOADING FAILED")
+            Log.e(TAG, "   Error type: UnsatisfiedLinkError")
+            Log.e(TAG, "   Error message: ${e.message}")
+            Log.e(TAG, "   Stack trace: ${e.stackTraceToString()}")
             isLibraryAvailable = false
-            currentPort = 6881 // Set default port even when library is not available
+            currentPort = 6881
+        } catch (e: NoClassDefFoundError) {
+            Log.e(TAG, "❌ CLASS NOT FOUND ERROR")
+            Log.e(TAG, "   Error type: NoClassDefFoundError") 
+            Log.e(TAG, "   Error message: ${e.message}")
+            Log.e(TAG, "   Missing class likely due to ProGuard or dependency issue")
+            isLibraryAvailable = false
+            currentPort = 6881
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to initialize jlibtorrent session: ${e.message}")
+            Log.e(TAG, "❌ GENERAL INITIALIZATION ERROR")
+            Log.e(TAG, "   Error type: ${e.javaClass.simpleName}")
+            Log.e(TAG, "   Error message: ${e.message}")
+            Log.e(TAG, "   Stack trace: ${e.stackTraceToString()}")
             isLibraryAvailable = false
-            currentPort = 6881 // Set default port even when initialization fails
+            currentPort = 6881
         }
+        
+        Log.d(TAG, "Final initialization state: isLibraryAvailable = $isLibraryAvailable")
     }
     
     
