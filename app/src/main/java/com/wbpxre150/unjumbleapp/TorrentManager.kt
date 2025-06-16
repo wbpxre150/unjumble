@@ -21,6 +21,7 @@ class TorrentManager private constructor(private val context: Context) {
     private var sessionManager: SessionManager? = null
     private var currentTorrentHandle: TorrentHandle? = null
     private var progressMonitorThread: Thread? = null
+    private var dhtMonitorThread: Thread? = null
     private var currentDownloadPath: String = ""
     private var isVerifying = false
     private var verificationStartTime: Long = 0
@@ -84,13 +85,18 @@ class TorrentManager private constructor(private val context: Context) {
             sessionManager = SessionManager()
             Log.d(TAG, "✓ SessionManager created successfully")
             
-            // Step 3: Configure settings (simplified approach)
+            // Step 3: Configure settings with DHT enabled
             Log.d(TAG, "Step 3: Configuring session settings...")
             val settingsPack = SettingsPack()
             Log.d(TAG, "✓ SettingsPack created successfully")
             
-            // For now, skip settings configuration to test basic functionality
-            Log.d(TAG, "  Using default settings for initial testing")
+            // Enable DHT for peer discovery
+            Log.d(TAG, "  Configuring DHT settings...")
+            settingsPack.enableDht(true)
+            Log.d(TAG, "  ✓ DHT enabled")
+            
+            // Note: DHT bootstrap will rely on built-in bootstrap nodes
+            Log.d(TAG, "  Using built-in DHT bootstrap nodes")
             
             // Step 4: Apply settings to session
             Log.d(TAG, "Step 4: Applying settings to session...")
@@ -101,6 +107,31 @@ class TorrentManager private constructor(private val context: Context) {
             Log.d(TAG, "Step 5: Starting jlibtorrent session...")
             sessionManager?.start()
             Log.d(TAG, "✓ Session started successfully")
+            
+            // Step 6: Wait for DHT bootstrap and verify
+            Log.d(TAG, "Step 6: Waiting for DHT bootstrap...")
+            
+            // Monitor DHT bootstrap progress for up to 10 seconds
+            for (i in 1..10) {
+                Thread.sleep(1000)
+                try {
+                    val stats = sessionManager?.stats()
+                    val dhtNodes = stats?.dhtNodes()?.toInt() ?: 0
+                    
+                    Log.d(TAG, "  DHT bootstrap check $i/10: nodes=$dhtNodes")
+                    
+                    if (dhtNodes > 0) {
+                        Log.d(TAG, "  ✓ DHT bootstrap successful after ${i}s with $dhtNodes nodes")
+                        break
+                    }
+                    
+                    if (i == 10) {
+                        Log.w(TAG, "  ⚠️ DHT bootstrap slow/failed after 10s - continuing anyway")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "  DHT stats error at ${i}s: ${e.message}")
+                }
+            }
             
             currentPort = 6881 // Use default port
             isLibraryAvailable = true
@@ -347,7 +378,26 @@ class TorrentManager private constructor(private val context: Context) {
             }
             
             Log.d(TAG, "Starting improved non-blocking P2P download for: $magnetLink")
+            
+            // Analyze magnet link for DHT/tracker info
+            if (magnetLink.contains("tr=")) {
+                Log.d(TAG, "  Magnet contains trackers - good for peer discovery")
+            } else {
+                Log.w(TAG, "  Magnet contains no trackers - relying purely on DHT")
+            }
+            
+            if (magnetLink.contains("xt=urn:btih:")) {
+                Log.d(TAG, "  Magnet contains valid info hash for DHT lookup")
+            } else {
+                Log.w(TAG, "  Magnet may not contain valid info hash")
+            }
+            
             currentMagnetLink = magnetLink
+            
+            // Check network status for debugging
+            Log.d(TAG, "Network status check:")
+            Log.d(TAG, "  WiFi: ${networkManager.isOnWiFi()}")
+            Log.d(TAG, "  Mobile data: ${networkManager.isOnMobileData()}")
             
             // Use a separate thread for fetchMagnet but provide immediate feedback
             Thread {
@@ -365,17 +415,11 @@ class TorrentManager private constructor(private val context: Context) {
                         listener.onMetadataFetching()
                     }
                     
-                    // Simulate progress updates during metadata fetching
-                    for (i in 1..10) {
-                        if (!isDownloading) break
-                        Thread.sleep(2000)
-                        handler.post {
-                            listener.onProgress(0, 0, 0, i) // Show increasing peer count simulation
-                        }
-                    }
+                    // Start real DHT peer monitoring during metadata fetching
+                    startDhtPeerMonitoring(listener)
                     
-                    Log.d(TAG, "Starting metadata fetch with timeout...")
-                    val data = sessionManager?.fetchMagnet(magnetLink, 30, false)
+                    Log.d(TAG, "Starting metadata fetch with 90s timeout for DHT...")
+                    val data = sessionManager?.fetchMagnet(magnetLink, 90, false)
                     
                     if (data != null && isDownloading) {
                         val torrentInfo = TorrentInfo.bdecode(data)
@@ -437,6 +481,73 @@ class TorrentManager private constructor(private val context: Context) {
             listener.onError("Failed to start P2P download: ${e.message}")
             isDownloading = false
         }
+    }
+    
+    private fun startDhtPeerMonitoring(listener: TorrentDownloadListener) {
+        // Stop any existing DHT monitoring thread
+        dhtMonitorThread?.interrupt()
+        
+        // Start DHT peer monitoring thread during metadata fetching
+        dhtMonitorThread = Thread {
+            Log.d(TAG, "[DHT MONITORING] Starting real peer discovery monitoring during metadata phase")
+            var lastReportedPeers = -1
+            val startTime = System.currentTimeMillis()
+            
+            while (isDownloading && (System.currentTimeMillis() - startTime) < 90000) { // Monitor for 90 seconds max
+                try {
+                    // Get DHT and session statistics for real peer discovery
+                    val sessionStats = sessionManager?.stats()
+                    val dhtNodes = sessionStats?.dhtNodes()?.toInt() ?: 0
+                    val downloadRate = sessionStats?.downloadRate()?.toInt() ?: 0
+                    val uploadRate = sessionStats?.uploadRate()?.toInt() ?: 0
+                    
+                    // Use DHT nodes as a proxy for potential peer connectivity
+                    val potentialPeers = Math.min(dhtNodes, 50) // Cap at reasonable number
+                    
+                    // Only report if peer count changed significantly or every 5 seconds
+                    val timeSinceStart = (System.currentTimeMillis() - startTime) / 1000
+                    val shouldReport = (potentialPeers != lastReportedPeers) || (timeSinceStart.toInt() % 5 == 0)
+                    
+                    if (shouldReport && isDownloading) {
+                        lastReportedPeers = potentialPeers
+                        Log.d(TAG, "[DHT MONITORING] DHT nodes: $dhtNodes, DL: ${downloadRate}B/s, UL: ${uploadRate}B/s, reporting: $potentialPeers")
+                        
+                        // DHT status analysis
+                        when {
+                            dhtNodes == 0 && timeSinceStart > 15 -> {
+                                Log.w(TAG, "[DHT MONITORING] DHT bootstrap appears to have failed after ${timeSinceStart}s - no DHT nodes")
+                            }
+                            dhtNodes > 0 && downloadRate == 0 && timeSinceStart > 45 -> {
+                                Log.w(TAG, "[DHT MONITORING] DHT is working ($dhtNodes nodes) but no download activity after ${timeSinceStart}s")
+                            }
+                            dhtNodes > 0 && downloadRate > 0 -> {
+                                Log.d(TAG, "[DHT MONITORING] Good: DHT working and download active at ${downloadRate}B/s")
+                            }
+                        }
+                        
+                        handler.post {
+                            listener.onProgress(0, 0, 0, potentialPeers) // Report real DHT-based peer count
+                        }
+                    }
+                    
+                    Thread.sleep(1500) // Update every 1.5 seconds for responsiveness
+                    
+                } catch (e: Exception) {
+                    Log.w(TAG, "[DHT MONITORING] Error getting DHT stats: ${e.message}")
+                    // Fallback to showing 0 peers instead of fake count
+                    if (isDownloading && lastReportedPeers != 0) {
+                        lastReportedPeers = 0
+                        handler.post {
+                            listener.onProgress(0, 0, 0, 0)
+                        }
+                    }
+                    Thread.sleep(2000)
+                }
+            }
+            
+            Log.d(TAG, "[DHT MONITORING] DHT peer monitoring completed - transitioning to torrent-based monitoring")
+        }
+        dhtMonitorThread?.start()
     }
     
     private fun startMetadataAndPeerMonitoring(listener: TorrentDownloadListener) {
@@ -945,6 +1056,8 @@ class TorrentManager private constructor(private val context: Context) {
         timeoutRunnable?.let { handler.removeCallbacks(it) }
         progressMonitorThread?.interrupt()
         progressMonitorThread = null
+        dhtMonitorThread?.interrupt()
+        dhtMonitorThread = null
         
         // Reset metadata waiting state
         waitingForMetadata = false
