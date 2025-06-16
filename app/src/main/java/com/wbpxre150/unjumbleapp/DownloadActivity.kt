@@ -62,23 +62,39 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
     }
 
     private fun startP2PDownload() {
-        statusTextView.text = "Initializing P2P download..."
-        timeRemainingTextView.text = "Starting P2P download..."
-        
         val magnetLink = getString(R.string.pictures_magnet_link)
         val downloadPath = File(filesDir, "pictures.tar.gz").absolutePath
+        
+        // Check for resume data first
+        val resumePrefs = getSharedPreferences("torrent_resume", MODE_PRIVATE)
+        val hasResumeData = resumePrefs.getBoolean("has_resume_data", false)
+        
+        if (hasResumeData) {
+            val downloadedSize = resumePrefs.getLong("downloaded_size", 0)
+            val totalSize = resumePrefs.getLong("total_size", 0)
+            
+            val downloadedMB = downloadedSize / (1024 * 1024)
+            val totalMB = totalSize / (1024 * 1024)
+            val progressPercent = if (totalSize > 0) (downloadedSize.toFloat() / totalSize * 100).toInt() else 0
+            
+            statusTextView.text = "Resuming P2P download from $progressPercent%..."
+            timeRemainingTextView.text = "Found ${downloadedMB}MB of ${totalMB}MB already downloaded"
+            
+            android.util.Log.d("DownloadActivity", "Resume data found: $progressPercent% complete (${downloadedMB}MB/${totalMB}MB)")
+        } else {
+            statusTextView.text = "Initializing P2P download..."
+            timeRemainingTextView.text = "Starting fresh P2P download..."
+        }
         
         // Store magnet link for future seeding sessions
         val prefs = getSharedPreferences("torrent_prefs", MODE_PRIVATE)
         prefs.edit().putString("magnet_link", magnetLink).apply()
         
-        statusTextView.text = "Starting P2P download..."
-        timeRemainingTextView.text = "Connecting to DHT network..."
-        
         // Phase-based timeout management - let TorrentManager handle timeouts
         phaseStartTime = System.currentTimeMillis()
         currentPhase = DownloadPhase.METADATA_FETCHING
         
+        // TorrentManager will automatically check for resume data and either resume or start fresh
         torrentManager.downloadFile(magnetLink, downloadPath, this)
     }
 
@@ -174,6 +190,10 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         currentPeerCount = 0
         hasActiveProgress = false
         lastProgressBytes = 0
+        
+        // Clear resume data on error to prevent corrupted state
+        clearResumeData()
+        
         android.util.Log.w("DownloadActivity", "P2P download failed: $error")
         GlobalScope.launch(Dispatchers.Main) {
             statusTextView.text = "P2P download failed, trying HTTPS fallback..."
@@ -193,6 +213,10 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         currentPeerCount = 0
         hasActiveProgress = false
         lastProgressBytes = 0
+        
+        // Keep resume data on timeout - user might want to retry P2P later
+        android.util.Log.d("DownloadActivity", "P2P timeout - keeping resume data for potential retry")
+        
         android.util.Log.w("DownloadActivity", "P2P download timed out")
         GlobalScope.launch(Dispatchers.Main) {
             statusTextView.text = "P2P download timed out, trying HTTPS fallback..."
@@ -354,7 +378,7 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         }
     }
     
-    private suspend fun downloadFromUrl(urlString: String, urlType: String): Boolean {
+    private suspend fun downloadFromUrl(urlString: String, @Suppress("UNUSED_PARAMETER") urlType: String): Boolean {
         return try {
             withContext(Dispatchers.Main) {
                 statusTextView.text = "HTTPS Download: Connecting..."
@@ -436,6 +460,9 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
             
             android.util.Log.d("DownloadActivity", "HTTPS download completed successfully")
             
+            // Clear any P2P resume data since HTTPS download succeeded
+            clearResumeData()
+            
             withContext(Dispatchers.Main) {
                 extractFiles(downloadFile)
             }
@@ -458,6 +485,18 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
             hours > 0 -> String.format("%d:%02d:%02d", hours, minutes, remainingSeconds)
             minutes > 0 -> String.format("%d:%02d", minutes, remainingSeconds)
             else -> String.format("%d seconds", remainingSeconds)
+        }
+    }
+    
+    private fun clearResumeData() {
+        try {
+            // Clear resume preferences
+            val resumePrefs = getSharedPreferences("torrent_resume", MODE_PRIVATE)
+            resumePrefs.edit().clear().apply()
+            
+            android.util.Log.d("DownloadActivity", "Resume data cleared from DownloadActivity")
+        } catch (e: Exception) {
+            android.util.Log.e("DownloadActivity", "Error clearing resume data", e)
         }
     }
 }

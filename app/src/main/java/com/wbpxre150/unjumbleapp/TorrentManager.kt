@@ -8,6 +8,8 @@ import java.io.File
 import org.libtorrent4j.*
 import org.libtorrent4j.alerts.*
 import org.libtorrent4j.swig.*
+import java.io.FileInputStream
+import java.io.FileOutputStream
 
 class TorrentManager private constructor(private val context: Context) {
     private val handler = Handler(Looper.getMainLooper())
@@ -32,11 +34,15 @@ class TorrentManager private constructor(private val context: Context) {
     private var lastBytesDownloaded: Long = 0
     private var downloadPhase: DownloadPhase = DownloadPhase.METADATA_FETCHING
     private var metadataStartTime: Long = 0
+    private var lastResumeDataSave: Long = 0
+    private val RESUME_DATA_SAVE_INTERVAL_MS = 30000L // Save resume data every 30 seconds
+    private var pendingResumeDataSave = false
     
     companion object {
         private const val TAG = "TorrentManager"
         private const val NO_PROGRESS_TIMEOUT_MS = 240000L // 4 minutes with no download progress before timeout
         private const val METADATA_TIMEOUT_MS = 60000L // 60 seconds for metadata fetching
+        private const val RESUME_PREFS = "torrent_resume"
         
         @Volatile
         private var INSTANCE: TorrentManager? = null
@@ -146,7 +152,20 @@ class TorrentManager private constructor(private val context: Context) {
         lastProgressTime = System.currentTimeMillis()
         lastBytesDownloaded = 0
         metadataStartTime = System.currentTimeMillis()
+        lastResumeDataSave = System.currentTimeMillis()
         downloadPhase = DownloadPhase.METADATA_FETCHING
+        pendingResumeDataSave = false
+        
+        // Check for existing resume data first
+        if (hasResumeData(magnetLink, downloadPath)) {
+            Log.d(TAG, "Found resume data - attempting to resume download")
+            resumeDownload(magnetLink, downloadPath, listener)
+            return
+        }
+        
+        // Store magnet link for resume data
+        val prefs = context.getSharedPreferences(RESUME_PREFS, Context.MODE_PRIVATE)
+        prefs.edit().putString("magnet_link", magnetLink).apply()
         
         // Notify initial phase
         handler.post {
@@ -155,6 +174,164 @@ class TorrentManager private constructor(private val context: Context) {
         
         // LibTorrent4j should already be initialized in init block
         continueDownloadAfterInit(magnetLink, downloadPath, listener)
+    }
+    
+    private fun hasResumeData(magnetLink: String, downloadPath: String): Boolean {
+        val prefs = context.getSharedPreferences(RESUME_PREFS, Context.MODE_PRIVATE)
+        val downloadFile = File(downloadPath)
+        
+        // Check if we have progress metadata and the partial download file exists
+        return prefs.getBoolean("has_resume_data", false) &&
+               prefs.getString("magnet_link", "") == magnetLink &&
+               prefs.getString("download_path", "") == downloadPath &&
+               downloadFile.exists() &&
+               downloadFile.length() > 0
+    }
+    
+    private fun resumeDownload(magnetLink: String, downloadPath: String, listener: TorrentDownloadListener) {
+        if (!isLibraryAvailable || sessionManager == null) {
+            Log.d(TAG, "LibTorrent not available - falling back to fresh download")
+            continueDownloadAfterInit(magnetLink, downloadPath, listener)
+            return
+        }
+        
+        try {
+            val downloadFile = File(downloadPath)
+            if (!downloadFile.exists() || downloadFile.length() == 0L) {
+                Log.w(TAG, "Resume: No partial download file found - starting fresh")
+                clearResumeData()
+                continueDownloadAfterInit(magnetLink, downloadPath, listener)
+                return
+            }
+            
+            val prefs = context.getSharedPreferences(RESUME_PREFS, Context.MODE_PRIVATE)
+            val savedSize = prefs.getLong("downloaded_size", 0L)
+            val fileSize = downloadFile.length()
+            
+            Log.d(TAG, "Resume: Found partial file ${fileSize} bytes, saved progress was ${savedSize} bytes")
+            
+            // Fetch magnet metadata with shorter timeout for resume
+            val downloadDir = File(downloadPath).parentFile
+            Log.d(TAG, "Resume: Fetching magnet metadata for resume...")
+            
+            val data = sessionManager?.fetchMagnet(magnetLink, 30, downloadDir ?: File(currentDownloadPath))
+            
+            if (data != null) {
+                val torrentInfo = TorrentInfo.bdecode(data)
+                Log.d(TAG, "Resume: Magnet metadata downloaded for resume")
+                
+                // Add torrent to session - LibTorrent will auto-detect existing partial file
+                sessionManager?.download(torrentInfo, downloadDir ?: File(currentDownloadPath))
+                currentTorrentHandle = sessionManager?.find(torrentInfo.infoHash())
+                
+                if (currentTorrentHandle?.isValid == true) {
+                    Log.d(TAG, "Resume: Torrent added, waiting for LibTorrent to scan existing file...")
+                    
+                    // Give LibTorrent time to scan the existing partial file
+                    handler.postDelayed({
+                        if (currentTorrentHandle?.isValid == true) {
+                            val status = currentTorrentHandle!!.status()
+                            val detectedProgress = status.progress()
+                            val totalWanted = status.totalWanted()
+                            val totalDone = status.totalWantedDone()
+                            
+                            Log.d(TAG, "Resume: LibTorrent detected progress: ${(detectedProgress * 100).toInt()}% (${totalDone}/${totalWanted} bytes)")
+                            
+                            if (detectedProgress > 0.01f) {
+                                Log.d(TAG, "Resume: Successfully resuming from ${(detectedProgress * 100).toInt()}%")
+                                transitionToPhase(DownloadPhase.ACTIVE_DOWNLOADING, listener)
+                            } else {
+                                Log.d(TAG, "Resume: LibTorrent couldn't detect progress, but continuing with partial file")
+                                transitionToPhase(DownloadPhase.PEER_DISCOVERY, listener)
+                            }
+                            
+                            handler.post {
+                                listener.onProgress(totalDone, totalWanted, 0, 0)
+                            }
+                            
+                            // Start progress monitoring
+                            startRealProgressMonitoring()
+                        }
+                    }, 3000) // 3 second delay for thorough file scanning
+                    
+                } else {
+                    Log.w(TAG, "Resume: Failed to add torrent for resume - starting fresh")
+                    clearResumeData()
+                    continueDownloadAfterInit(magnetLink, downloadPath, listener)
+                }
+            } else {
+                Log.w(TAG, "Resume: Failed to fetch magnet metadata for resume - starting fresh")
+                clearResumeData()
+                continueDownloadAfterInit(magnetLink, downloadPath, listener)
+            }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Resume: Error during resume attempt - starting fresh download", e)
+            clearResumeData()
+            continueDownloadAfterInit(magnetLink, downloadPath, listener)
+        }
+    }
+    
+    private fun saveResumeData() {
+        if (!isDownloading || currentTorrentHandle == null || !currentTorrentHandle!!.isValid) {
+            return
+        }
+        
+        if (pendingResumeDataSave) {
+            Log.d(TAG, "Resume data save already pending")
+            return
+        }
+        
+        try {
+            pendingResumeDataSave = true
+            Log.d(TAG, "Saving torrent progress metadata...")
+            
+            // Instead of complex resume data, save current progress metadata
+            // This will help us know if we should attempt resume
+            val status = currentTorrentHandle!!.status()
+            val prefs = context.getSharedPreferences(RESUME_PREFS, Context.MODE_PRIVATE)
+            
+            prefs.edit().apply {
+                putBoolean("has_resume_data", true)
+                putString("download_path", currentDownloadPath)
+                putLong("total_size", status.totalWanted())
+                putLong("downloaded_size", status.totalWantedDone())
+                putLong("last_save_time", System.currentTimeMillis())
+                if (currentTorrentHandle?.isValid == true) {
+                    putString("info_hash", currentTorrentHandle!!.infoHash().toString())
+                }
+                apply()
+            }
+            
+            lastResumeDataSave = System.currentTimeMillis()
+            
+            val downloadedMB = status.totalWantedDone() / (1024 * 1024)
+            val totalMB = status.totalWanted() / (1024 * 1024)
+            val progress = if (status.totalWanted() > 0) {
+                (status.totalWantedDone().toFloat() / status.totalWanted() * 100).toInt()
+            } else 0
+            
+            Log.d(TAG, "Progress metadata saved: $progress% complete (${downloadedMB}MB/${totalMB}MB)")
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error saving progress metadata", e)
+        } finally {
+            pendingResumeDataSave = false
+        }
+    }
+    
+    // This method is no longer needed with the simplified approach
+    // LibTorrent will auto-resume based on existing partial files
+    
+    private fun clearResumeData() {
+        try {
+            val prefs = context.getSharedPreferences(RESUME_PREFS, Context.MODE_PRIVATE)
+            prefs.edit().clear().apply()
+            
+            Log.d(TAG, "Resume progress metadata cleared")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error clearing resume data", e)
+        }
     }
     
     private fun continueDownloadAfterInit(magnetLink: String, downloadPath: String, listener: TorrentDownloadListener) {
@@ -547,6 +724,11 @@ class TorrentManager private constructor(private val context: Context) {
                     
                     if (isComplete && isDownloading) {
                         Log.d(TAG, "Download completed - state: $state, progress: ${status.progress()}")
+                        
+                        // Clear resume data since download is complete
+                        clearResumeData()
+                        Log.d(TAG, "Resume data cleared after completion")
+                        
                         handler.post {
                             downloadListener?.onCompleted(currentDownloadPath)
                         }
@@ -584,6 +766,13 @@ class TorrentManager private constructor(private val context: Context) {
                     if (isDownloading) {
                         handler.post {
                             downloadListener?.onProgress(totalWantedDone, totalWanted, downloadRate, numPeers)
+                        }
+                        
+                        // Periodic resume data saving
+                        val currentTime = System.currentTimeMillis()
+                        if (currentTime - lastResumeDataSave > RESUME_DATA_SAVE_INTERVAL_MS && !pendingResumeDataSave) {
+                            Log.d(TAG, "Saving resume data (periodic)")
+                            saveResumeData()
                         }
                     }
                     
@@ -740,6 +929,12 @@ class TorrentManager private constructor(private val context: Context) {
     }
     
     fun stopDownload() {
+        // Save resume data before stopping if download was active
+        if (isDownloading && currentTorrentHandle?.isValid == true) {
+            Log.d(TAG, "Saving resume data before stopping download")
+            saveResumeDataSync() // Synchronous save before cleanup
+        }
+        
         isDownloading = false
         isVerifying = false
         timeoutRunnable?.let { handler.removeCallbacks(it) }
@@ -755,6 +950,7 @@ class TorrentManager private constructor(private val context: Context) {
         lastBytesDownloaded = 0
         metadataStartTime = 0
         downloadPhase = DownloadPhase.METADATA_FETCHING
+        pendingResumeDataSave = false
         
         // Remove torrent from session if it exists
         currentTorrentHandle?.let { handle ->
@@ -764,6 +960,41 @@ class TorrentManager private constructor(private val context: Context) {
         }
         currentTorrentHandle = null
         downloadListener = null
+    }
+    
+    private fun saveResumeDataSync() {
+        if (currentTorrentHandle == null || !currentTorrentHandle!!.isValid) {
+            return
+        }
+        
+        try {
+            Log.d(TAG, "Synchronous progress metadata save before stop")
+            
+            // Save final progress state
+            val status = currentTorrentHandle!!.status()
+            val prefs = context.getSharedPreferences(RESUME_PREFS, Context.MODE_PRIVATE)
+            
+            prefs.edit().apply {
+                putBoolean("has_resume_data", true)
+                putString("download_path", currentDownloadPath)
+                putLong("total_size", status.totalWanted())
+                putLong("downloaded_size", status.totalWantedDone())
+                putLong("last_save_time", System.currentTimeMillis())
+                if (currentTorrentHandle?.isValid == true) {
+                    putString("info_hash", currentTorrentHandle!!.infoHash().toString())
+                }
+                apply()
+            }
+            
+            val progress = if (status.totalWanted() > 0) {
+                (status.totalWantedDone().toFloat() / status.totalWanted() * 100).toInt()
+            } else 0
+            
+            Log.d(TAG, "Final progress saved before stop: $progress%")
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error saving final progress state", e)
+        }
     }
     
     fun seedFile(filePath: String, listener: TorrentDownloadListener? = null) {
