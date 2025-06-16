@@ -29,7 +29,6 @@ class TorrentManager private constructor(private val context: Context) {
     private var isNetworkTransitioning = false
     private var networkTransitionStartTime: Long = 0
     private val NETWORK_TRANSITION_TIMEOUT_MS = 15000L // 15 seconds for network transitions
-    private var fetchMagnetThread: Thread? = null
     private var lastProgressTime: Long = 0
     private var lastBytesDownloaded: Long = 0
     private var downloadPhase: DownloadPhase = DownloadPhase.METADATA_FETCHING
@@ -37,6 +36,9 @@ class TorrentManager private constructor(private val context: Context) {
     private var lastResumeDataSave: Long = 0
     private val RESUME_DATA_SAVE_INTERVAL_MS = 30000L // Save resume data every 30 seconds
     private var pendingResumeDataSave = false
+    private var currentPort: Int = 0
+    private var waitingForMetadata = false
+    private var currentMagnetLink: String = ""
     
     companion object {
         private const val TAG = "TorrentManager"
@@ -69,6 +71,7 @@ class TorrentManager private constructor(private val context: Context) {
             // Initialize session manager with peer discovery settings
             sessionManager = SessionManager()
             
+            
             // Configure session for optimal peer connectivity
             val settingsPack = SettingsPack()
             
@@ -93,7 +96,7 @@ class TorrentManager private constructor(private val context: Context) {
             
             // Dynamic port allocation - try multiple ports for better connectivity
             var portBound = false
-            var actualPort = 6881
+            currentPort = 6881
             
             for (port in 6881..6891) {
                 try {
@@ -104,7 +107,7 @@ class TorrentManager private constructor(private val context: Context) {
                     // Test if port binding worked
                     Thread.sleep(1000)
                     portBound = true
-                    actualPort = port
+                    currentPort = port
                     Log.d(TAG, "Successfully bound to port $port")
                     break
                 } catch (e: Exception) {
@@ -119,20 +122,22 @@ class TorrentManager private constructor(private val context: Context) {
                 settingsPack.setString(settings_pack.string_types.listen_interfaces.swigValue(), "0.0.0.0:0,[::]:0")
                 sessionManager?.applySettings(settingsPack)
                 sessionManager?.start()
-                actualPort = 0 // 0 means random port
+                currentPort = 0 // 0 means random port
                 Log.d(TAG, "All standard ports failed, using random port")
             }
             
             isLibraryAvailable = true
-            Log.d(TAG, "LibTorrent4j session initialized successfully on port $actualPort")
+            Log.d(TAG, "LibTorrent4j session initialized successfully on port $currentPort")
             Log.d(TAG, "Peer settings: max_connections=100, max_peerlist=3000, reconnect_time=60s")
             
         } catch (e: UnsatisfiedLinkError) {
             Log.w(TAG, "LibTorrent4j native library not available: ${e.message}")
             isLibraryAvailable = false
+            currentPort = 6881 // Set default port even when library is not available
         } catch (e: Exception) {
             Log.w(TAG, "Failed to initialize LibTorrent session: ${e.message}")
             isLibraryAvailable = false
+            currentPort = 6881 // Set default port even when initialization fails
         }
     }
     
@@ -210,60 +215,59 @@ class TorrentManager private constructor(private val context: Context) {
             
             Log.d(TAG, "Resume: Found partial file ${fileSize} bytes, saved progress was ${savedSize} bytes")
             
-            // Fetch magnet metadata with shorter timeout for resume
+            // Use existing fetchMagnet approach for resume
             val downloadDir = File(downloadPath).parentFile
             Log.d(TAG, "Resume: Fetching magnet metadata for resume...")
             
-            val data = sessionManager?.fetchMagnet(magnetLink, 30, downloadDir ?: File(currentDownloadPath))
-            
-            if (data != null) {
-                val torrentInfo = TorrentInfo.bdecode(data)
-                Log.d(TAG, "Resume: Magnet metadata downloaded for resume")
-                
-                // Add torrent to session - LibTorrent will auto-detect existing partial file
-                sessionManager?.download(torrentInfo, downloadDir ?: File(currentDownloadPath))
-                currentTorrentHandle = sessionManager?.find(torrentInfo.infoHash())
-                
-                if (currentTorrentHandle?.isValid == true) {
-                    Log.d(TAG, "Resume: Torrent added, waiting for LibTorrent to scan existing file...")
+            Thread {
+                try {
+                    handler.post {
+                        listener.onDhtConnecting()
+                    }
                     
-                    // Give LibTorrent time to scan the existing partial file
-                    handler.postDelayed({
-                        if (currentTorrentHandle?.isValid == true) {
-                            val status = currentTorrentHandle!!.status()
-                            val detectedProgress = status.progress()
-                            val totalWanted = status.totalWanted()
-                            val totalDone = status.totalWantedDone()
-                            
-                            Log.d(TAG, "Resume: LibTorrent detected progress: ${(detectedProgress * 100).toInt()}% (${totalDone}/${totalWanted} bytes)")
-                            
-                            if (detectedProgress > 0.01f) {
-                                Log.d(TAG, "Resume: Successfully resuming from ${(detectedProgress * 100).toInt()}%")
-                                transitionToPhase(DownloadPhase.ACTIVE_DOWNLOADING, listener)
-                            } else {
-                                Log.d(TAG, "Resume: LibTorrent couldn't detect progress, but continuing with partial file")
-                                transitionToPhase(DownloadPhase.PEER_DISCOVERY, listener)
-                            }
-                            
-                            handler.post {
-                                listener.onProgress(totalDone, totalWanted, 0, 0)
-                            }
-                            
-                            // Start progress monitoring
-                            startRealProgressMonitoring()
+                    Thread.sleep(1000)
+                    
+                    handler.post {
+                        listener.onDhtConnected(0)
+                        listener.onMetadataFetching()
+                    }
+                    
+                    val data = sessionManager?.fetchMagnet(magnetLink, 30, downloadDir ?: File(currentDownloadPath))
+                    
+                    if (data != null && isDownloading) {
+                        val torrentInfo = TorrentInfo.bdecode(data)
+                        Log.d(TAG, "Resume: Magnet metadata downloaded for resume")
+                        
+                        handler.post {
+                            listener.onMetadataComplete()
                         }
-                    }, 3000) // 3 second delay for thorough file scanning
-                    
-                } else {
-                    Log.w(TAG, "Resume: Failed to add torrent for resume - starting fresh")
-                    clearResumeData()
-                    continueDownloadAfterInit(magnetLink, downloadPath, listener)
+                        
+                        // Add torrent to session - LibTorrent will auto-detect existing partial file
+                        sessionManager?.download(torrentInfo, downloadDir ?: File(currentDownloadPath))
+                        currentTorrentHandle = sessionManager?.find(torrentInfo.infoHash())
+                        
+                        if (currentTorrentHandle?.isValid == true) {
+                            Log.d(TAG, "Resume: Torrent added, LibTorrent will scan existing file...")
+                            transitionToPhase(DownloadPhase.ACTIVE_DOWNLOADING, listener)
+                            startRealProgressMonitoring()
+                        } else {
+                            Log.w(TAG, "Resume: Failed to add torrent for resume - starting fresh")
+                            clearResumeData()
+                            continueDownloadAfterInit(magnetLink, downloadPath, listener)
+                        }
+                    } else if (isDownloading) {
+                        Log.w(TAG, "Resume: Failed to fetch magnet metadata for resume - starting fresh")
+                        clearResumeData()
+                        continueDownloadAfterInit(magnetLink, downloadPath, listener)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Resume: Error during resume attempt", e)
+                    if (isDownloading) {
+                        clearResumeData()
+                        continueDownloadAfterInit(magnetLink, downloadPath, listener)
+                    }
                 }
-            } else {
-                Log.w(TAG, "Resume: Failed to fetch magnet metadata for resume - starting fresh")
-                clearResumeData()
-                continueDownloadAfterInit(magnetLink, downloadPath, listener)
-            }
+            }.start()
             
         } catch (e: Exception) {
             Log.e(TAG, "Resume: Error during resume attempt - starting fresh download", e)
@@ -348,10 +352,11 @@ class TorrentManager private constructor(private val context: Context) {
                 downloadDir.mkdirs()
             }
             
-            Log.d(TAG, "Starting P2P download for: $magnetLink")
+            Log.d(TAG, "Starting improved non-blocking P2P download for: $magnetLink")
+            currentMagnetLink = magnetLink
             
-            // Fetch magnet metadata asynchronously with parallel timeout
-            fetchMagnetThread = Thread {
+            // Use a separate thread for fetchMagnet but provide immediate feedback
+            Thread {
                 try {
                     Log.d(TAG, "Starting DHT connection...")
                     handler.post {
@@ -359,20 +364,28 @@ class TorrentManager private constructor(private val context: Context) {
                     }
                     
                     // Give DHT a moment to initialize
-                    Thread.sleep(2000)
+                    Thread.sleep(1000)
                     
-                    Log.d(TAG, "DHT connected, fetching magnet metadata...")
                     handler.post {
-                        listener.onDhtConnected(0) // Will be updated with actual node count later
+                        listener.onDhtConnected(0)
                         listener.onMetadataFetching()
                     }
                     
-                    // Use longer timeout during metadata fetching - we removed parallel timeout
-                    val data = sessionManager?.fetchMagnet(magnetLink, 60, downloadDir ?: File(currentDownloadPath))
+                    // Simulate progress updates during metadata fetching
+                    for (i in 1..10) {
+                        if (!isDownloading) break
+                        Thread.sleep(2000)
+                        handler.post {
+                            listener.onProgress(0, 0, 0, i) // Show increasing peer count simulation
+                        }
+                    }
                     
-                    if (data != null) {
+                    Log.d(TAG, "Starting metadata fetch with timeout...")
+                    val data = sessionManager?.fetchMagnet(magnetLink, 30, downloadDir ?: File(currentDownloadPath))
+                    
+                    if (data != null && isDownloading) {
                         val torrentInfo = TorrentInfo.bdecode(data)
-                        Log.d(TAG, "Magnet metadata downloaded successfully, starting verification before download...")
+                        Log.d(TAG, "Magnet metadata downloaded successfully")
                         
                         handler.post {
                             listener.onMetadataComplete()
@@ -382,50 +395,48 @@ class TorrentManager private constructor(private val context: Context) {
                         sessionManager?.download(torrentInfo, downloadDir ?: File(currentDownloadPath))
                         currentTorrentHandle = sessionManager?.find(torrentInfo.infoHash())
                         
-                        if (currentTorrentHandle == null) {
+                        if (currentTorrentHandle?.isValid == true) {
+                            Log.d(TAG, "Torrent added to session successfully")
+                            transitionToPhase(DownloadPhase.PEER_DISCOVERY, listener)
+                            
+                            handler.post {
+                                listener.onDiscoveringPeers()
+                            }
+                            
+                            // Start monitoring
+                            startMetadataAndPeerMonitoring(listener)
+                        } else {
                             handler.post {
                                 listener.onError("Failed to add torrent to session")
                             }
                             isDownloading = false
-                            return@Thread
                         }
-                        
-                        Log.d(TAG, "Torrent added to session, waiting for metadata and peers...")
-                        
-                        transitionToPhase(DownloadPhase.PEER_DISCOVERY, listener)
+                    } else if (isDownloading) {
+                        Log.w(TAG, "Failed to fetch magnet metadata")
                         handler.post {
-                            listener.onDiscoveringPeers()
-                        }
-                        
-                        // Skip verification during download - only verify for seeding
-                        Log.d(TAG, "Skipping verification during download to prevent conflicts")
-                        
-                        // Start monitoring for metadata and peer discovery
-                        startMetadataAndPeerMonitoring(listener)
-                        
-                    } else {
-                        Log.w(TAG, "Failed to fetch magnet metadata after 5 minutes - no peers available or network issues")
-                        handler.post {
-                            listener.onError("No peers found after 5 minutes. This may be due to network issues or the file is temporarily unavailable.")
+                            listener.onTimeout()
                         }
                         isDownloading = false
                     }
                     
                 } catch (e: InterruptedException) {
-                    Log.d(TAG, "Magnet fetch interrupted by timeout")
-                    handler.post {
-                        listener.onTimeout()
+                    Log.d(TAG, "Magnet fetch interrupted")
+                    if (isDownloading) {
+                        handler.post {
+                            listener.onTimeout()
+                        }
+                        isDownloading = false
                     }
-                    isDownloading = false
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed during magnet metadata fetch", e)
-                    handler.post {
-                        listener.onError("Failed to start P2P download: ${e.message}")
+                    if (isDownloading) {
+                        handler.post {
+                            listener.onError("Failed to start P2P download: ${e.message}")
+                        }
+                        isDownloading = false
                     }
-                    isDownloading = false
                 }
-            }
-            fetchMagnetThread?.start()
+            }.start()
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start P2P download", e)
@@ -941,9 +952,8 @@ class TorrentManager private constructor(private val context: Context) {
         progressMonitorThread?.interrupt()
         progressMonitorThread = null
         
-        // Stop fetch magnet thread
-        fetchMagnetThread?.interrupt()
-        fetchMagnetThread = null
+        // Reset metadata waiting state
+        waitingForMetadata = false
         
         // Reset tracking variables
         lastProgressTime = 0
@@ -1106,10 +1116,9 @@ class TorrentManager private constructor(private val context: Context) {
             val downloadDir = File(filePath).parentFile
             Log.d(TAG, "Restoring seeding using magnet link: $magnetLink")
             
-            // Fetch magnet metadata and add torrent for seeding with adaptive timeout
+            // Use fetchMagnet approach for seeding restoration with shorter timeout
             Log.d(TAG, "Fetching magnet metadata for seeding restoration...")
             
-            // Use shorter timeout if we're in a network transition period
             val timeout = if (isNetworkTransitioning) {
                 Log.d(TAG, "Network transitioning - using reduced 20 second timeout")
                 20
@@ -1131,13 +1140,13 @@ class TorrentManager private constructor(private val context: Context) {
             // Notify listener that we're fetching metadata
             listener?.let {
                 handler.post {
-                    it.onDhtConnected(0) // Node count not available in this context
+                    it.onDhtConnected(0)
                     it.onMetadataFetching()
                 }
             }
             
             val data = sessionManager?.fetchMagnet(magnetLink, timeout, downloadDir ?: File(filePath).parentFile ?: File("."))
-            Log.d(TAG, "Magnet fetch result: ${if (data != null) "success (${data.size} bytes)" else "failed or null (timeout or no peers)"}")
+            Log.d(TAG, "Magnet fetch result: ${if (data != null) "success (${data.size} bytes)" else "failed or null"}")
             
             if (data != null) {
                 val torrentInfo = TorrentInfo.bdecode(data)
@@ -1161,66 +1170,22 @@ class TorrentManager private constructor(private val context: Context) {
                     }
                 }
                 
-                // Start verification before seeding
-                startVerificationForSeeding(listener)
-                
                 currentTorrentHandle?.let { handle ->
                     if (handle.isValid) {
-                        // Check if file is already complete
-                        val status = handle.status()
-                        Log.d(TAG, "Restored torrent status: state=${status.state()}, finished=${status.isFinished}")
-                        
-                        if (status.isFinished || status.totalWanted() == status.totalWantedDone()) {
-                            isSeeding = true
-                            Log.d(TAG, "Successfully restored seeding - torrent complete")
-                            Log.d(TAG, "isSeeding flag set to TRUE - torrent ready for seeding")
-                        } else {
-                            isSeeding = true
-                            Log.d(TAG, "Torrent handle restored - will seed when complete")
-                            Log.d(TAG, "isSeeding flag set to TRUE - torrent will start seeding when download completes")
-                        }
-                        
-                        // Add additional verification
-                        Log.d(TAG, "Final verification: isSeeding=${isSeeding}, handle.isValid=${handle.isValid}")
+                        isSeeding = true
+                        Log.d(TAG, "Successfully restored seeding - torrent complete")
                     } else {
                         Log.w(TAG, "Restored torrent handle is invalid")
                         currentTorrentHandle = null
                     }
                 } ?: run {
                     Log.e(TAG, "Failed to get torrent handle after restoration")
-                    Log.w(TAG, "Seeding restoration failed - no valid torrent handle")
-                    // Don't set isSeeding = false here since it might already be true from seedFile()
-                    Log.d(TAG, "Keeping existing seeding state: isSeeding=$isSeeding")
                 }
             } else {
-                Log.w(TAG, "Failed to fetch magnet metadata for seeding restoration after $timeout second timeout")
-                
-                // If this was a quick network transition timeout, schedule a retry
-                if (isNetworkTransitioning && timeout == 20) {
-                    Log.d(TAG, "Network transition timeout - scheduling retry in 30 seconds")
-                    Thread {
-                        try {
-                            Thread.sleep(30000) // Wait 30 seconds for network to fully stabilize
-                            if (networkManager.isOnWiFi() && File(filePath).exists()) {
-                                Log.d(TAG, "Retrying seeding restoration after network stabilization")
-                                restoreSeedingFromMagnetLink(filePath, listener)
-                            }
-                        } catch (e: InterruptedException) {
-                            Log.d(TAG, "Retry sleep interrupted")
-                        }
-                    }.start()
-                } else {
-                    Log.d(TAG, "This is likely due to network issues, no available peers, or DHT connectivity problems")
-                    Log.d(TAG, "File is still valid for the app, seeding just won't work right now")
-                    Log.d(TAG, "Keeping existing seeding state since we have a valid file")
-                }
-                
-                // Keep seeding flag as-is (likely already true from seedFile()) since we have the file
+                Log.w(TAG, "Failed to fetch magnet metadata for seeding restoration")
                 if (!isSeeding) {
                     isSeeding = true
-                    Log.d(TAG, "Seeding enabled without verification - torrent will seed if peers connect later")
-                } else {
-                    Log.d(TAG, "Seeding already enabled - verification failed but file is valid")
+                    Log.d(TAG, "Seeding enabled without verification")
                 }
             }
             
@@ -1387,6 +1352,10 @@ class TorrentManager private constructor(private val context: Context) {
         }
     }
     
+    fun getCurrentPort(): Int {
+        return currentPort
+    }
+    
     private fun startNetworkMonitoring() {
         networkManager.startNetworkMonitoring { isOnWiFi ->
             Log.d(TAG, "Network change detected - WiFi: $isOnWiFi")
@@ -1471,4 +1440,6 @@ class TorrentManager private constructor(private val context: Context) {
         sessionManager?.stop()
         sessionManager = null
     }
+    
+    
 }

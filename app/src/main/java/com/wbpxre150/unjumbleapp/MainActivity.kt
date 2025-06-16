@@ -61,6 +61,8 @@ class MainActivity : Activity(), TorrentDownloadListener {
     private var isSeedingInitializing = false
     private var seedingInitStartTime: Long = 0
     private var downloadRetryCount = 0
+    private var totalPeersFound = 0
+    private var connectedPeers = 0
     private val networkManager = NetworkManager.getInstance(this)
     
     companion object {
@@ -928,6 +930,12 @@ class MainActivity : Activity(), TorrentDownloadListener {
                 isSeeding && peerCount > 0 -> {
                     val uploadKB = uploadRate / 1024
                     val mode = if (isLibraryLoaded) "P2P" else "Simulated"
+                    val port = torrentManager?.getCurrentPort() ?: 0
+                    val portStr = when {
+                        port > 0 -> ":$port"
+                        port == 0 && (torrentManager?.isLibraryLoaded() == true) -> ":random"
+                        else -> ":6881" // Default when library not loaded or uninitialized
+                    }
                     
                     // Try to get seed count from torrent handle
                     val seedCount = try {
@@ -938,14 +946,20 @@ class MainActivity : Activity(), TorrentDownloadListener {
                     val leecherCount = maxOf(0, peerCount - seedCount)
                     
                     if (seedCount > 0) {
-                        peerCountTextView.text = "Torrent: Sharing with $seedCount seeds, $leecherCount leechers (${uploadKB}KB/s) [$mode]"
+                        peerCountTextView.text = "Torrent: Sharing with $seedCount seeds, $leecherCount leechers (${uploadKB}KB/s) [$mode$portStr]"
                     } else {
-                        peerCountTextView.text = "Torrent: Sharing with $peerCount peers (${uploadKB}KB/s) [$mode]"
+                        peerCountTextView.text = "Torrent: Sharing with $peerCount peers (${uploadKB}KB/s) [$mode$portStr]"
                     }
                 }
                 isSeeding -> {
                     val mode = if (isLibraryLoaded) "P2P" else "Simulated"
-                    peerCountTextView.text = "Torrent: Seeding (0 peers) [$mode]"
+                    val port = torrentManager?.getCurrentPort() ?: 0
+                    val portStr = when {
+                        port > 0 -> ":$port"
+                        port == 0 && (torrentManager?.isLibraryLoaded() == true) -> ":random"
+                        else -> ":6881" // Default when library not loaded or uninitialized
+                    }
+                    peerCountTextView.text = "Torrent: Seeding (0 peers) [$mode$portStr]"
                 }
                 !isSeedingEnabled -> {
                     peerCountTextView.text = "Torrent: Seeding disabled"
@@ -1031,15 +1045,22 @@ class MainActivity : Activity(), TorrentDownloadListener {
     
     // TorrentDownloadListener implementation for background download
     override fun onProgress(downloaded: Long, total: Long, downloadRate: Int, peers: Int) {
+        connectedPeers = peers // Connected peers are those actively transferring data
         val progress = if (total > 0) (downloaded.toFloat() / total * 100).toInt() else 0
         val downloadSpeedKB = downloadRate / 1024
         val downloadedMB = downloaded / (1024 * 1024)
         val totalMB = total / (1024 * 1024)
+        val port = torrentManager?.getCurrentPort() ?: 0
+        val portStr = when {
+            port > 0 -> " [P2P:$port]"
+            port == 0 && (torrentManager?.isLibraryLoaded() == true) -> " [P2P:random]"
+            else -> " [P2P:6881]" // Default when library not loaded or uninitialized
+        }
         
         val statusText = if (total > 0) {
-            "Background Download: $progress% (${downloadedMB}MB/${totalMB}MB) - $peers peers - ${downloadSpeedKB}KB/s"
+            "Background Download: $progress% (${downloadedMB}MB/${totalMB}MB) - $peers peers - ${downloadSpeedKB}KB/s$portStr"
         } else {
-            "Background Download: Connecting... ($peers peers)"
+            "Background Download: Connecting... ($peers peers)$portStr"
         }
         
         peerCountTextView.text = statusText
@@ -1051,6 +1072,8 @@ class MainActivity : Activity(), TorrentDownloadListener {
         android.util.Log.d("MainActivity", "Setting isBackgroundDownloading=false - interference protection disabled")
         isBackgroundDownloading = false
         downloadRetryCount = 0 // Reset retry counter on success
+        totalPeersFound = 0
+        connectedPeers = 0
         
         val downloadedFile = File(filePath)
         if (verifyFileHash(downloadedFile)) {
@@ -1071,6 +1094,8 @@ class MainActivity : Activity(), TorrentDownloadListener {
         android.util.Log.w("MainActivity", "Background P2P download failed: $error (attempt ${downloadRetryCount + 1}/$MAX_DOWNLOAD_RETRIES)")
         android.util.Log.d("MainActivity", "Setting isBackgroundDownloading=false due to error - interference protection disabled")
         isBackgroundDownloading = false
+        totalPeersFound = 0
+        connectedPeers = 0
         
         if (downloadRetryCount < MAX_DOWNLOAD_RETRIES) {
             downloadRetryCount++
@@ -1092,6 +1117,8 @@ class MainActivity : Activity(), TorrentDownloadListener {
         android.util.Log.w("MainActivity", "Background P2P download timed out (attempt ${downloadRetryCount + 1}/$MAX_DOWNLOAD_RETRIES)")
         android.util.Log.d("MainActivity", "Setting isBackgroundDownloading=false due to timeout - interference protection disabled")
         isBackgroundDownloading = false
+        totalPeersFound = 0
+        connectedPeers = 0
         
         if (downloadRetryCount < MAX_DOWNLOAD_RETRIES) {
             downloadRetryCount++
@@ -1112,7 +1139,11 @@ class MainActivity : Activity(), TorrentDownloadListener {
     override fun onVerifying(progress: Float) {
         val progressPercent = (progress * 100).toInt()
         if (progress == 0.0f) {
-            peerCountTextView.text = "Torrent: Fetching metadata..."
+            peerCountTextView.text = if (totalPeersFound > 0) {
+                "Torrent: Fetching metadata ($connectedPeers/$totalPeersFound peers)..."
+            } else {
+                "Torrent: Fetching metadata..."
+            }
         } else {
             peerCountTextView.text = "Torrent: Verifying $progressPercent%"
         }
@@ -1140,13 +1171,18 @@ class MainActivity : Activity(), TorrentDownloadListener {
 
     override fun onSeedsFound(seedCount: Int, peerCount: Int) {
         android.util.Log.d("MainActivity", "Found $seedCount seeds, $peerCount total peers")
+        totalPeersFound = peerCount
         val leecherCount = peerCount - seedCount
         peerCountTextView.text = "Torrent: Found $seedCount seeds, $leecherCount leechers"
     }
 
     override fun onMetadataFetching() {
         android.util.Log.d("MainActivity", "Fetching metadata...")
-        peerCountTextView.text = "Torrent: Fetching file metadata..."
+        peerCountTextView.text = if (totalPeersFound > 0) {
+            "Torrent: Fetching metadata ($connectedPeers/$totalPeersFound peers)..."
+        } else {
+            "Torrent: Fetching file metadata..."
+        }
     }
 
     override fun onMetadataComplete() {

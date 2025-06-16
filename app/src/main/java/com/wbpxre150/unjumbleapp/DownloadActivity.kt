@@ -28,8 +28,11 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
     private var phaseTimeoutSeconds: Int = 0
     private var isDhtConnected = false
     private var currentPeerCount = 0
+    private var totalPeersFound = 0
+    private var connectedPeers = 0
     private var hasActiveProgress = false
     private var lastProgressBytes: Long = 0
+    private val networkManager = NetworkManager.getInstance(this)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -52,11 +55,35 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
 
         GlobalScope.launch(Dispatchers.Main) {
             try {
-                startP2PDownload()
+                startDownload()
             } catch (e: Exception) {
                 e.printStackTrace()
                 statusTextView.text = "Error: ${e.message}"
                 android.util.Log.e("DownloadActivity", "Error during download/extraction", e)
+            }
+        }
+    }
+
+    private fun startDownload() {
+        // Check network type and decide download strategy
+        when {
+            networkManager.isOnMobileData() -> {
+                android.util.Log.d("DownloadActivity", "On mobile data - DHT discovery doesn't work, using HTTPS download")
+                statusTextView.text = "Mobile data detected - using direct download"
+                timeRemainingTextView.text = "P2P downloads require WiFi connection"
+                startHttpDownload()
+            }
+            networkManager.isOnWiFi() -> {
+                android.util.Log.d("DownloadActivity", "On WiFi - attempting P2P download first")
+                statusTextView.text = "WiFi detected - attempting P2P download"
+                timeRemainingTextView.text = "P2P downloads work best on WiFi"
+                startP2PDownload()
+            }
+            else -> {
+                android.util.Log.d("DownloadActivity", "Network type unknown - attempting P2P download")
+                statusTextView.text = "Checking network - attempting P2P download"
+                timeRemainingTextView.text = "Starting download process"
+                startP2PDownload()
             }
         }
     }
@@ -101,6 +128,7 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
     // TorrentDownloadListener implementation
     override fun onProgress(downloaded: Long, total: Long, downloadRate: Int, peers: Int) {
         currentPeerCount = peers
+        connectedPeers = peers // Connected peers are those actively transferring data
         
         // Track progress for timeout prevention
         hasActiveProgress = downloaded > lastProgressBytes
@@ -117,23 +145,39 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         val totalMB = total / (1024 * 1024)
         
         // Phase-aware status messages
+        val port = torrentManager.getCurrentPort()
+        android.util.Log.d("DownloadActivity", "Current port: $port, Phase: $currentPhase")
+        val portStr = when {
+            port > 0 -> " [P2P:$port]"
+            port == 0 && torrentManager.isLibraryLoaded() -> " [P2P:random]"
+            else -> " [P2P:6881]" // Default when library not loaded or uninitialized
+        }
+        
         statusTextView.text = when (currentPhase) {
             DownloadPhase.METADATA_FETCHING -> {
-                if (total > 0) "File info received, starting download..." 
-                else "Fetching file information from $peers peers"
+                if (total > 0) "File info received, starting download...$portStr" 
+                else if (totalPeersFound > 0) {
+                    "Fetching file information ($connectedPeers/$totalPeersFound peers)$portStr"
+                } else {
+                    "Fetching file information from $peers peers$portStr"
+                }
             }
             DownloadPhase.PEER_DISCOVERY -> {
-                "Found $peers peers, establishing connections..."
+                if (totalPeersFound > 0) {
+                    "Connecting to peers ($connectedPeers/$totalPeersFound found)$portStr"
+                } else {
+                    "Found $peers peers, establishing connections...$portStr"
+                }
             }
             DownloadPhase.ACTIVE_DOWNLOADING -> {
                 if (total > 0) {
-                    "Downloading: $progress% (${downloadedMB}MB/${totalMB}MB) from $peers peers"
+                    "Downloading: $progress% (${downloadedMB}MB/${totalMB}MB) from $peers peers$portStr"
                 } else {
-                    "Preparing download from $peers peers..."
+                    "Preparing download from $peers peers...$portStr"
                 }
             }
             DownloadPhase.VERIFICATION -> {
-                "Verifying download..."
+                "Verifying download...$portStr"
             }
         }
         
@@ -165,6 +209,8 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         // Reset tracking variables
         isDhtConnected = false
         currentPeerCount = 0
+        totalPeersFound = 0
+        connectedPeers = 0
         hasActiveProgress = false
         lastProgressBytes = 0
         GlobalScope.launch(Dispatchers.Main) {
@@ -188,6 +234,8 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         // Reset tracking variables
         isDhtConnected = false
         currentPeerCount = 0
+        totalPeersFound = 0
+        connectedPeers = 0
         hasActiveProgress = false
         lastProgressBytes = 0
         
@@ -197,7 +245,11 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         android.util.Log.w("DownloadActivity", "P2P download failed: $error")
         GlobalScope.launch(Dispatchers.Main) {
             statusTextView.text = "P2P download failed, trying HTTPS fallback..."
-            timeRemainingTextView.text = "Switching to direct download"
+            timeRemainingTextView.text = if (networkManager.isOnMobileData()) {
+                "Mobile data may have caused P2P failure - using direct download"
+            } else {
+                "Switching to direct download"
+            }
             startHttpDownload()
         }
     }
@@ -211,6 +263,8 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         // Reset tracking variables
         isDhtConnected = false
         currentPeerCount = 0
+        totalPeersFound = 0
+        connectedPeers = 0
         hasActiveProgress = false
         lastProgressBytes = 0
         
@@ -220,7 +274,11 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         android.util.Log.w("DownloadActivity", "P2P download timed out")
         GlobalScope.launch(Dispatchers.Main) {
             statusTextView.text = "P2P download timed out, trying HTTPS fallback..."
-            timeRemainingTextView.text = "Switching to direct download"
+            timeRemainingTextView.text = if (networkManager.isOnMobileData()) {
+                "Mobile data may have caused P2P timeout - using direct download"
+            } else {
+                "No peers found - switching to direct download"
+            }
             startHttpDownload()
         }
     }
@@ -259,6 +317,7 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
 
     override fun onSeedsFound(seedCount: Int, peerCount: Int) {
         android.util.Log.d("DownloadActivity", "Found $seedCount seeds, $peerCount total peers")
+        totalPeersFound = peerCount
         statusTextView.text = "Found peers: $seedCount seeds, ${peerCount - seedCount} leechers"
         timeRemainingTextView.text = "Connecting to $peerCount peers for download"
         
