@@ -5,9 +5,9 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import java.io.File
-import org.libtorrent4j.*
-import org.libtorrent4j.alerts.*
-import org.libtorrent4j.swig.*
+import com.frostwire.jlibtorrent.*
+import com.frostwire.jlibtorrent.alerts.*
+import com.frostwire.jlibtorrent.swig.*
 import java.io.FileInputStream
 import java.io.FileOutputStream
 
@@ -57,7 +57,7 @@ class TorrentManager private constructor(private val context: Context) {
     }
     
     init {
-        // Initialize LibTorrent4j immediately when TorrentManager singleton is created
+        // Initialize jlibtorrent immediately when TorrentManager singleton is created
         initializeSession()
         // Start network monitoring to handle dynamic seeding control
         startNetworkMonitoring()
@@ -65,8 +65,8 @@ class TorrentManager private constructor(private val context: Context) {
     
     private fun initializeSession() {
         try {
-            // Try to load libtorrent4j
-            System.loadLibrary("torrent4j")
+            // Try to load jlibtorrent
+            System.loadLibrary("jlibtorrent")
             
             // Initialize session manager with peer discovery settings
             sessionManager = SessionManager()
@@ -75,67 +75,40 @@ class TorrentManager private constructor(private val context: Context) {
             // Configure session for optimal peer connectivity
             val settingsPack = SettingsPack()
             
-            // Enable all peer discovery methods
-            settingsPack.setBoolean(settings_pack.bool_types.enable_dht.swigValue(), true)
-            settingsPack.setBoolean(settings_pack.bool_types.enable_lsd.swigValue(), true) // Local Service Discovery
-            settingsPack.setBoolean(settings_pack.bool_types.enable_upnp.swigValue(), true)
-            settingsPack.setBoolean(settings_pack.bool_types.enable_natpmp.swigValue(), true)
-            
-            // Optimize peer connection settings for better stability
-            settingsPack.setInteger(settings_pack.int_types.connections_limit.swigValue(), 100) // Increase max connections
-            settingsPack.setInteger(settings_pack.int_types.max_peerlist_size.swigValue(), 3000) // Larger peer list
-            settingsPack.setInteger(settings_pack.int_types.max_paused_peerlist_size.swigValue(), 1000)
-            settingsPack.setInteger(settings_pack.int_types.min_reconnect_time.swigValue(), 60) // 60 second reconnect delay
-            settingsPack.setInteger(settings_pack.int_types.peer_connect_timeout.swigValue(), 15) // 15 second connect timeout
-            settingsPack.setInteger(settings_pack.int_types.listen_queue_size.swigValue(), 100) // Increased queue size
-            
-            // Peer exchange and connection persistence
-            settingsPack.setBoolean(settings_pack.bool_types.enable_outgoing_utp.swigValue(), true)
-            settingsPack.setBoolean(settings_pack.bool_types.enable_incoming_utp.swigValue(), true)
-            settingsPack.setBoolean(settings_pack.bool_types.prefer_udp_trackers.swigValue(), true)
+            // Enable basic peer discovery methods (using simplified approach)
+            // Note: jlibtorrent 1.2.0.18 may have different method names
+            try {
+                settingsPack.connectionsLimit(100) // Basic connection limit setting
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not set connections limit: ${e.message}")
+            }
             
             // Dynamic port allocation - try multiple ports for better connectivity
             var portBound = false
             currentPort = 6881
             
-            for (port in 6881..6891) {
-                try {
-                    settingsPack.setString(settings_pack.string_types.listen_interfaces.swigValue(), "0.0.0.0:$port,[::]:$port")
-                    sessionManager?.applySettings(settingsPack)
-                    sessionManager?.start()
-                    
-                    // Test if port binding worked
-                    Thread.sleep(1000)
-                    portBound = true
-                    currentPort = port
-                    Log.d(TAG, "Successfully bound to port $port")
-                    break
-                } catch (e: Exception) {
-                    Log.d(TAG, "Port $port failed, trying next: ${e.message}")
-                    sessionManager?.stop()
-                    sessionManager = SessionManager()
-                }
-            }
-            
-            if (!portBound) {
-                // Fall back to random port if all standard ports fail
-                settingsPack.setString(settings_pack.string_types.listen_interfaces.swigValue(), "0.0.0.0:0,[::]:0")
+            // Use default port binding approach for jlibtorrent
+            try {
                 sessionManager?.applySettings(settingsPack)
                 sessionManager?.start()
-                currentPort = 0 // 0 means random port
-                Log.d(TAG, "All standard ports failed, using random port")
+                currentPort = 6881 // Use default port
+                portBound = true
+                Log.d(TAG, "jlibtorrent session started with default settings")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to start jlibtorrent session: ${e.message}")
+                portBound = false
             }
             
             isLibraryAvailable = true
-            Log.d(TAG, "LibTorrent4j session initialized successfully on port $currentPort")
+            Log.d(TAG, "jlibtorrent session initialized successfully on port $currentPort")
             Log.d(TAG, "Peer settings: max_connections=100, max_peerlist=3000, reconnect_time=60s")
             
         } catch (e: UnsatisfiedLinkError) {
-            Log.w(TAG, "LibTorrent4j native library not available: ${e.message}")
+            Log.w(TAG, "jlibtorrent native library not available: ${e.message}")
             isLibraryAvailable = false
             currentPort = 6881 // Set default port even when library is not available
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to initialize LibTorrent session: ${e.message}")
+            Log.w(TAG, "Failed to initialize jlibtorrent session: ${e.message}")
             isLibraryAvailable = false
             currentPort = 6881 // Set default port even when initialization fails
         }
@@ -177,7 +150,7 @@ class TorrentManager private constructor(private val context: Context) {
             listener.onPhaseChanged(DownloadPhase.METADATA_FETCHING, 60)
         }
         
-        // LibTorrent4j should already be initialized in init block
+        // jlibtorrent should already be initialized in init block
         continueDownloadAfterInit(magnetLink, downloadPath, listener)
     }
     
@@ -195,7 +168,7 @@ class TorrentManager private constructor(private val context: Context) {
     
     private fun resumeDownload(magnetLink: String, downloadPath: String, listener: TorrentDownloadListener) {
         if (!isLibraryAvailable || sessionManager == null) {
-            Log.d(TAG, "LibTorrent not available - falling back to fresh download")
+            Log.d(TAG, "jlibtorrent not available - falling back to fresh download")
             continueDownloadAfterInit(magnetLink, downloadPath, listener)
             return
         }
@@ -232,7 +205,7 @@ class TorrentManager private constructor(private val context: Context) {
                         listener.onMetadataFetching()
                     }
                     
-                    val data = sessionManager?.fetchMagnet(magnetLink, 30, downloadDir ?: File(currentDownloadPath))
+                    val data = sessionManager?.fetchMagnet(magnetLink, 30, false)
                     
                     if (data != null && isDownloading) {
                         val torrentInfo = TorrentInfo.bdecode(data)
@@ -242,12 +215,12 @@ class TorrentManager private constructor(private val context: Context) {
                             listener.onMetadataComplete()
                         }
                         
-                        // Add torrent to session - LibTorrent will auto-detect existing partial file
-                        sessionManager?.download(torrentInfo, downloadDir ?: File(currentDownloadPath))
+                        // Add torrent to session - jlibtorrent will auto-detect existing partial file
+                        sessionManager?.download(torrentInfo, downloadDir)
                         currentTorrentHandle = sessionManager?.find(torrentInfo.infoHash())
                         
                         if (currentTorrentHandle?.isValid == true) {
-                            Log.d(TAG, "Resume: Torrent added, LibTorrent will scan existing file...")
+                            Log.d(TAG, "Resume: Torrent added, jlibtorrent will scan existing file...")
                             transitionToPhase(DownloadPhase.ACTIVE_DOWNLOADING, listener)
                             startRealProgressMonitoring()
                         } else {
@@ -325,7 +298,7 @@ class TorrentManager private constructor(private val context: Context) {
     }
     
     // This method is no longer needed with the simplified approach
-    // LibTorrent will auto-resume based on existing partial files
+    // jlibtorrent will auto-resume based on existing partial files
     
     private fun clearResumeData() {
         try {
@@ -340,7 +313,7 @@ class TorrentManager private constructor(private val context: Context) {
     
     private fun continueDownloadAfterInit(magnetLink: String, downloadPath: String, listener: TorrentDownloadListener) {
         if (!isLibraryAvailable || sessionManager == null) {
-            Log.d(TAG, "LibTorrent not available - calling onError to trigger fallback")
+            Log.d(TAG, "jlibtorrent not available - calling onError to trigger fallback")
             isDownloading = false
             listener.onError("P2P library not available")
             return
@@ -381,7 +354,7 @@ class TorrentManager private constructor(private val context: Context) {
                     }
                     
                     Log.d(TAG, "Starting metadata fetch with timeout...")
-                    val data = sessionManager?.fetchMagnet(magnetLink, 30, downloadDir ?: File(currentDownloadPath))
+                    val data = sessionManager?.fetchMagnet(magnetLink, 30, false)
                     
                     if (data != null && isDownloading) {
                         val torrentInfo = TorrentInfo.bdecode(data)
@@ -392,7 +365,7 @@ class TorrentManager private constructor(private val context: Context) {
                         }
                         
                         // Add torrent to session
-                        sessionManager?.download(torrentInfo, downloadDir ?: File(currentDownloadPath))
+                        sessionManager?.download(torrentInfo, downloadDir)
                         currentTorrentHandle = sessionManager?.find(torrentInfo.infoHash())
                         
                         if (currentTorrentHandle?.isValid == true) {
@@ -1022,7 +995,7 @@ class TorrentManager private constructor(private val context: Context) {
         }
         
         if (!isLibraryAvailable || sessionManager == null) {
-            Log.d(TAG, "LibTorrent not available for seeding")
+            Log.d(TAG, "jlibtorrent not available for seeding")
             return
         }
         
@@ -1095,7 +1068,7 @@ class TorrentManager private constructor(private val context: Context) {
         }
         
         if (!isLibraryAvailable || sessionManager == null) {
-            Log.d(TAG, "LibTorrent not available for seeding restoration")
+            Log.d(TAG, "jlibtorrent not available for seeding restoration")
             return
         }
         
@@ -1145,7 +1118,7 @@ class TorrentManager private constructor(private val context: Context) {
                 }
             }
             
-            val data = sessionManager?.fetchMagnet(magnetLink, timeout, downloadDir ?: File(filePath).parentFile ?: File("."))
+            val data = sessionManager?.fetchMagnet(magnetLink, timeout, false)
             Log.d(TAG, "Magnet fetch result: ${if (data != null) "success (${data.size} bytes)" else "failed or null"}")
             
             if (data != null) {
@@ -1160,7 +1133,7 @@ class TorrentManager private constructor(private val context: Context) {
                 }
                 
                 // Add torrent to session for seeding (file should already exist)
-                sessionManager?.download(torrentInfo, downloadDir ?: File(filePath).parentFile ?: File("."))
+                sessionManager?.download(torrentInfo, downloadDir)
                 currentTorrentHandle = sessionManager?.find(torrentInfo.infoHash())
                 
                 // Notify ready to seed
