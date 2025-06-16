@@ -1,4 +1,5 @@
 <resources>
     <string name="app_name">UnjumbleApp</string>
     <string name="pictures_magnet_link" formatted="false">magnet:?xt=urn:btih:de7684ef8791cbf1daad1d005ca097dd4388f1dc&amp;dn=pictures.tar.gz&amp;tr=https%3A%2F%2Ftracker.yemekyedim.com%3A443%2Fannounce&amp;tr=https%3A%2F%2Ftracker.pmman.tech%3A443%2Fannounce&amp;tr=https%3A%2F%2Ftracker.itscraftsoftware.my.id%3A443%2Fannounce&amp;tr=https%3A%2F%2Ftracker.bt4g.com%3A443%2Fannounce&amp;tr=https%3A%2F%2Ftracker.zhuqiy.top%3A443%2Fannounce&amp;tr=https%3A%2F%2Ftracker.moeblog.cn%3A443%2Fannounce&amp;tr=https%3A%2F%2Ftracker.linvk.com%3A443%2Fannounce&amp;tr=https%3A%2F%2Ftracker.leechshield.link%3A443%2Fannounce&amp;tr=https%3A%2F%2Ftracker.ghostchu-services.top%3A443%2Fannounce&amp;tr=https%3A%2F%2Ftracker.gcrenwp.top%3A443%2Fannounce&amp;tr=https%3A%2F%2Ftracker.expli.top%3A443%2Fannounce&amp;tr=https%3A%2F%2Ftr.zukizuki.org%3A443%2Fannounce&amp;tr=https%3A%2F%2Fsparkle.ghostchu-services.top%3A443%2Fannounce</string>
+    <string name="pictures_primary_url">https://unjumble.au/files/pictures.tar.gz</string>
 </resources>

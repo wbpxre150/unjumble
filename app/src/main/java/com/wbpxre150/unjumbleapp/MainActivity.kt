@@ -928,7 +928,20 @@ class MainActivity : Activity(), TorrentDownloadListener {
                 isSeeding && peerCount > 0 -> {
                     val uploadKB = uploadRate / 1024
                     val mode = if (isLibraryLoaded) "P2P" else "Simulated"
-                    peerCountTextView.text = "Torrent: Sharing with $peerCount peers (${uploadKB}KB/s) [$mode]"
+                    
+                    // Try to get seed count from torrent handle
+                    val seedCount = try {
+                        torrentManager?.getCurrentTorrentHandle()?.status()?.numSeeds() ?: 0
+                    } catch (e: Exception) {
+                        0
+                    }
+                    val leecherCount = maxOf(0, peerCount - seedCount)
+                    
+                    if (seedCount > 0) {
+                        peerCountTextView.text = "Torrent: Sharing with $seedCount seeds, $leecherCount leechers (${uploadKB}KB/s) [$mode]"
+                    } else {
+                        peerCountTextView.text = "Torrent: Sharing with $peerCount peers (${uploadKB}KB/s) [$mode]"
+                    }
                 }
                 isSeeding -> {
                     val mode = if (isLibraryLoaded) "P2P" else "Simulated"
@@ -1103,6 +1116,55 @@ class MainActivity : Activity(), TorrentDownloadListener {
         } else {
             peerCountTextView.text = "Torrent: Verifying $progressPercent%"
         }
+    }
+
+    // Enhanced status callbacks for better torrent lifecycle tracking
+    override fun onDhtConnecting() {
+        android.util.Log.d("MainActivity", "DHT connecting...")
+        peerCountTextView.text = "Torrent: Connecting to DHT network..."
+    }
+
+    override fun onDhtConnected(nodeCount: Int) {
+        android.util.Log.d("MainActivity", "DHT connected with $nodeCount nodes")
+        peerCountTextView.text = if (nodeCount > 0) {
+            "Torrent: DHT connected ($nodeCount nodes)"
+        } else {
+            "Torrent: DHT network connected"
+        }
+    }
+
+    override fun onDiscoveringPeers() {
+        android.util.Log.d("MainActivity", "Discovering peers...")
+        peerCountTextView.text = "Torrent: Searching for peers..."
+    }
+
+    override fun onSeedsFound(seedCount: Int, peerCount: Int) {
+        android.util.Log.d("MainActivity", "Found $seedCount seeds, $peerCount total peers")
+        val leecherCount = peerCount - seedCount
+        peerCountTextView.text = "Torrent: Found $seedCount seeds, $leecherCount leechers"
+    }
+
+    override fun onMetadataFetching() {
+        android.util.Log.d("MainActivity", "Fetching metadata...")
+        peerCountTextView.text = "Torrent: Fetching file metadata..."
+    }
+
+    override fun onMetadataComplete() {
+        android.util.Log.d("MainActivity", "Metadata complete")
+        peerCountTextView.text = "Torrent: Metadata received, preparing file..."
+    }
+
+    override fun onReadyToSeed() {
+        android.util.Log.d("MainActivity", "Ready to seed")
+        peerCountTextView.text = "Torrent: File ready, starting seeding..."
+        // Clear the seeding initialization flag since we're ready
+        isSeedingInitializing = false
+    }
+    
+    override fun onPhaseChanged(phase: DownloadPhase, timeoutSeconds: Int) {
+        // MainActivity doesn't need to do anything special with phase changes
+        // since it only uses TorrentManager for seeding, not downloading
+        android.util.Log.d("MainActivity", "Torrent phase changed to $phase with ${timeoutSeconds}s timeout")
     }
     
     private fun checkSeedingInitialization() {

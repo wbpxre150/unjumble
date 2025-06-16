@@ -8,6 +8,8 @@ import android.widget.TextView
 import kotlinx.coroutines.*
 import java.io.File
 import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.zip.GZIPInputStream
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 
@@ -18,6 +20,16 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
     private lateinit var timeRemainingTextView: TextView
     private lateinit var torrentManager: TorrentManager
     private var isP2PAttemptFinished = false
+    private var downloadStartTime: Long = 0
+    private var lastProgressUpdate: Long = 0
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var currentPhase: DownloadPhase = DownloadPhase.METADATA_FETCHING
+    private var phaseStartTime: Long = 0
+    private var phaseTimeoutSeconds: Int = 0
+    private var isDhtConnected = false
+    private var currentPeerCount = 0
+    private var hasActiveProgress = false
+    private var lastProgressBytes: Long = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -63,11 +75,21 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         statusTextView.text = "Starting P2P download..."
         timeRemainingTextView.text = "Connecting to DHT network..."
         
+        // Phase-based timeout management - let TorrentManager handle timeouts
+        phaseStartTime = System.currentTimeMillis()
+        currentPhase = DownloadPhase.METADATA_FETCHING
+        
         torrentManager.downloadFile(magnetLink, downloadPath, this)
     }
 
     // TorrentDownloadListener implementation
     override fun onProgress(downloaded: Long, total: Long, downloadRate: Int, peers: Int) {
+        currentPeerCount = peers
+        
+        // Track progress for timeout prevention
+        hasActiveProgress = downloaded > lastProgressBytes
+        lastProgressBytes = downloaded
+        
         val progress = if (total > 0) (downloaded.toFloat() / total * 100).toInt() else 0
         progressBar.progress = progress
         
@@ -78,18 +100,43 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         val downloadedMB = downloaded / (1024 * 1024)
         val totalMB = total / (1024 * 1024)
         
-        statusTextView.text = if (total > 0) {
-            "P2P Download: $progress% (${downloadedMB}MB/${totalMB}MB) - $peers peers"
-        } else {
-            "P2P Download: Connecting... ($peers peers)"
+        // Phase-aware status messages
+        statusTextView.text = when (currentPhase) {
+            DownloadPhase.METADATA_FETCHING -> {
+                if (total > 0) "File info received, starting download..." 
+                else "Fetching file information from $peers peers"
+            }
+            DownloadPhase.PEER_DISCOVERY -> {
+                "Found $peers peers, establishing connections..."
+            }
+            DownloadPhase.ACTIVE_DOWNLOADING -> {
+                if (total > 0) {
+                    "Downloading: $progress% (${downloadedMB}MB/${totalMB}MB) from $peers peers"
+                } else {
+                    "Preparing download from $peers peers..."
+                }
+            }
+            DownloadPhase.VERIFICATION -> {
+                "Verifying download..."
+            }
         }
         
         timeRemainingTextView.text = if (downloadRate > 0) {
             "Speed: ${downloadSpeedKB}KB/s | ETA: ${formatTime(estimatedSeconds)}"
         } else if (peers > 0) {
-            "Connected to $peers peers - waiting for data..."
+            when (currentPhase) {
+                DownloadPhase.METADATA_FETCHING -> "Getting file details from peers..."
+                DownloadPhase.PEER_DISCOVERY -> "Connecting to $peers available peers..."
+                DownloadPhase.ACTIVE_DOWNLOADING -> "Connected to $peers peers - waiting for data..."
+                DownloadPhase.VERIFICATION -> "Checking file integrity..."
+            }
         } else {
-            "Searching for peers..."
+            when (currentPhase) {
+                DownloadPhase.METADATA_FETCHING -> "Searching for peers with this file..."
+                DownloadPhase.PEER_DISCOVERY -> "No peers found yet, still searching..."
+                DownloadPhase.ACTIVE_DOWNLOADING -> "No active peers, reconnecting..."
+                DownloadPhase.VERIFICATION -> "Verifying downloaded data..."
+            }
         }
     }
 
@@ -99,6 +146,11 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
             return
         }
         isP2PAttemptFinished = true
+        // Reset tracking variables
+        isDhtConnected = false
+        currentPeerCount = 0
+        hasActiveProgress = false
+        lastProgressBytes = 0
         GlobalScope.launch(Dispatchers.Main) {
             try {
                 extractFiles(File(filePath))
@@ -117,10 +169,16 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
             return
         }
         isP2PAttemptFinished = true
+        // Reset tracking variables
+        isDhtConnected = false
+        currentPeerCount = 0
+        hasActiveProgress = false
+        lastProgressBytes = 0
         android.util.Log.w("DownloadActivity", "P2P download failed: $error")
         GlobalScope.launch(Dispatchers.Main) {
-            statusTextView.text = "P2P download failed: $error"
-            timeRemainingTextView.text = "Please check your internet connection and try again"
+            statusTextView.text = "P2P download failed, trying HTTPS fallback..."
+            timeRemainingTextView.text = "Switching to direct download"
+            startHttpDownload()
         }
     }
 
@@ -130,10 +188,16 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
             return
         }
         isP2PAttemptFinished = true
+        // Reset tracking variables
+        isDhtConnected = false
+        currentPeerCount = 0
+        hasActiveProgress = false
+        lastProgressBytes = 0
         android.util.Log.w("DownloadActivity", "P2P download timed out")
         GlobalScope.launch(Dispatchers.Main) {
-            statusTextView.text = "P2P download timed out"
-            timeRemainingTextView.text = "No peers found. Please try again later."
+            statusTextView.text = "P2P download timed out, trying HTTPS fallback..."
+            timeRemainingTextView.text = "Switching to direct download"
+            startHttpDownload()
         }
     }
 
@@ -141,11 +205,85 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         val progressPercent = (progress * 100).toInt()
         progressBar.progress = progressPercent
         if (progress == 0.0f) {
-            statusTextView.text = "Connecting to P2P network..."
-            timeRemainingTextView.text = "Finding peers (this may take a few minutes)..."
+            // Don't override the progressive timeout messages
+            // The failsafe timeout will handle the status updates
         } else {
             statusTextView.text = "Verifying torrent: $progressPercent%"
             timeRemainingTextView.text = "Checking file integrity..."
+        }
+    }
+
+    // Enhanced status callbacks for better torrent lifecycle tracking
+    override fun onDhtConnecting() {
+        android.util.Log.d("DownloadActivity", "DHT connecting...")
+        statusTextView.text = "Connecting to DHT network..."
+        timeRemainingTextView.text = "Initializing P2P connection"
+    }
+
+    override fun onDhtConnected(nodeCount: Int) {
+        isDhtConnected = true
+        android.util.Log.d("DownloadActivity", "DHT connected with $nodeCount nodes")
+        statusTextView.text = "DHT network connected"
+        timeRemainingTextView.text = if (nodeCount > 0) "Connected to $nodeCount DHT nodes" else "DHT connection established"
+    }
+
+    override fun onDiscoveringPeers() {
+        android.util.Log.d("DownloadActivity", "Discovering peers...")
+        statusTextView.text = "Searching for peers..."
+        timeRemainingTextView.text = "Looking for other users sharing this file"
+    }
+
+    override fun onSeedsFound(seedCount: Int, peerCount: Int) {
+        android.util.Log.d("DownloadActivity", "Found $seedCount seeds, $peerCount total peers")
+        statusTextView.text = "Found peers: $seedCount seeds, ${peerCount - seedCount} leechers"
+        timeRemainingTextView.text = "Connecting to $peerCount peers for download"
+        
+        // Update current peer count
+        currentPeerCount = peerCount
+    }
+
+    override fun onMetadataFetching() {
+        android.util.Log.d("DownloadActivity", "Fetching metadata...")
+        statusTextView.text = "Fetching file metadata..."
+        timeRemainingTextView.text = "Getting file information from peers"
+    }
+
+    override fun onMetadataComplete() {
+        android.util.Log.d("DownloadActivity", "Metadata complete")
+        statusTextView.text = "Metadata received successfully"
+        timeRemainingTextView.text = "File information downloaded, starting transfer"
+    }
+
+    override fun onReadyToSeed() {
+        android.util.Log.d("DownloadActivity", "Ready to seed")
+        statusTextView.text = "File verified, ready to share"
+        timeRemainingTextView.text = "Preparing to seed file to other users"
+    }
+
+    override fun onPhaseChanged(phase: DownloadPhase, timeoutSeconds: Int) {
+        android.util.Log.d("DownloadActivity", "Phase changed to $phase with ${timeoutSeconds}s timeout")
+        currentPhase = phase
+        phaseStartTime = System.currentTimeMillis()
+        phaseTimeoutSeconds = timeoutSeconds
+        
+        // Update UI based on new phase
+        when (phase) {
+            DownloadPhase.METADATA_FETCHING -> {
+                statusTextView.text = "Fetching file information..."
+                timeRemainingTextView.text = "Getting details from torrent network"
+            }
+            DownloadPhase.PEER_DISCOVERY -> {
+                statusTextView.text = "Searching for peers..."
+                timeRemainingTextView.text = "Finding users sharing this file"
+            }
+            DownloadPhase.ACTIVE_DOWNLOADING -> {
+                statusTextView.text = "Starting download..."
+                timeRemainingTextView.text = "Beginning file transfer"
+            }
+            DownloadPhase.VERIFICATION -> {
+                statusTextView.text = "Verifying download..."
+                timeRemainingTextView.text = "Checking file integrity"
+            }
         }
     }
 
@@ -199,6 +337,117 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
 
         startActivity(Intent(this, MainActivity::class.java))
         finish()
+    }
+
+    private fun startHttpDownload() {
+        val primaryUrl = getString(R.string.pictures_primary_url)
+        
+        GlobalScope.launch(Dispatchers.IO) {
+            val success = downloadFromUrl(primaryUrl, "Direct")
+            
+            if (!success) {
+                GlobalScope.launch(Dispatchers.Main) {
+                    statusTextView.text = "Download failed"
+                    timeRemainingTextView.text = "Please check your internet connection and try again"
+                }
+            }
+        }
+    }
+    
+    private suspend fun downloadFromUrl(urlString: String, urlType: String): Boolean {
+        return try {
+            withContext(Dispatchers.Main) {
+                statusTextView.text = "HTTPS Download: Connecting..."
+                timeRemainingTextView.text = "Establishing connection..."
+                progressBar.progress = 0
+            }
+            
+            val url = URL(urlString)
+            val connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 15000
+            connection.readTimeout = 30000
+            connection.connect()
+            
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) {
+                android.util.Log.w("DownloadActivity", "HTTPS download failed: ${connection.responseCode}")
+                withContext(Dispatchers.Main) {
+                    statusTextView.text = "HTTPS download failed (${connection.responseCode})"
+                }
+                return false
+            }
+            
+            val fileLength = connection.contentLength
+            val downloadFile = File(filesDir, "pictures.tar.gz")
+            val inputStream = connection.inputStream
+            val outputStream = FileOutputStream(downloadFile)
+            
+            downloadStartTime = System.currentTimeMillis()
+            lastProgressUpdate = downloadStartTime
+            
+            val buffer = ByteArray(8192)
+            var totalDownloaded = 0L
+            var bytesRead: Int
+            
+            while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                outputStream.write(buffer, 0, bytesRead)
+                totalDownloaded += bytesRead
+                
+                val currentTime = System.currentTimeMillis()
+                if (currentTime - lastProgressUpdate > 500) { // Update every 500ms
+                    lastProgressUpdate = currentTime
+                    
+                    val progress = if (fileLength > 0) {
+                        (totalDownloaded.toFloat() / fileLength * 100).toInt()
+                    } else 0
+                    
+                    val elapsedSeconds = (currentTime - downloadStartTime) / 1000
+                    val downloadRate = if (elapsedSeconds > 0) {
+                        (totalDownloaded / elapsedSeconds).toInt()
+                    } else 0
+                    
+                    val downloadedMB = totalDownloaded / (1024 * 1024)
+                    val totalMB = fileLength / (1024 * 1024)
+                    val downloadSpeedKB = downloadRate / 1024
+                    
+                    val estimatedSeconds = if (downloadRate > 0 && fileLength > 0) {
+                        ((fileLength - totalDownloaded) / downloadRate).toInt()
+                    } else 0
+                    
+                    withContext(Dispatchers.Main) {
+                        progressBar.progress = progress
+                        statusTextView.text = if (fileLength > 0) {
+                            "HTTPS Download: $progress% (${downloadedMB}MB/${totalMB}MB)"
+                        } else {
+                            "HTTPS Download: ${downloadedMB}MB downloaded"
+                        }
+                        timeRemainingTextView.text = if (downloadRate > 0) {
+                            "Speed: ${downloadSpeedKB}KB/s | ETA: ${formatTime(estimatedSeconds)}"
+                        } else {
+                            "Downloading..."
+                        }
+                    }
+                }
+            }
+            
+            outputStream.close()
+            inputStream.close()
+            connection.disconnect()
+            
+            android.util.Log.d("DownloadActivity", "HTTPS download completed successfully")
+            
+            withContext(Dispatchers.Main) {
+                extractFiles(downloadFile)
+            }
+            
+            true
+        } catch (e: Exception) {
+            android.util.Log.e("DownloadActivity", "HTTPS download failed", e)
+            withContext(Dispatchers.Main) {
+                statusTextView.text = "HTTPS download failed: ${e.message}"
+            }
+            false
+        }
     }
 
     private fun formatTime(seconds: Int): String {

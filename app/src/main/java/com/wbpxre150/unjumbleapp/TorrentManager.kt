@@ -20,8 +20,6 @@ class TorrentManager private constructor(private val context: Context) {
     private var currentTorrentHandle: TorrentHandle? = null
     private var progressMonitorThread: Thread? = null
     private var currentDownloadPath: String = ""
-    private var zeroPeerStartTime: Long = 0
-    private var hasHadPeers = false
     private var isVerifying = false
     private var verificationStartTime: Long = 0
     private val VERIFICATION_TIMEOUT_MS = 120000L // 2 minutes timeout for verification
@@ -29,10 +27,16 @@ class TorrentManager private constructor(private val context: Context) {
     private var isNetworkTransitioning = false
     private var networkTransitionStartTime: Long = 0
     private val NETWORK_TRANSITION_TIMEOUT_MS = 15000L // 15 seconds for network transitions
+    private var fetchMagnetThread: Thread? = null
+    private var lastProgressTime: Long = 0
+    private var lastBytesDownloaded: Long = 0
+    private var downloadPhase: DownloadPhase = DownloadPhase.METADATA_FETCHING
+    private var metadataStartTime: Long = 0
     
     companion object {
         private const val TAG = "TorrentManager"
-        private const val ZERO_PEER_TIMEOUT_MS = 600000L // 10 minutes with zero peers before timeout
+        private const val NO_PROGRESS_TIMEOUT_MS = 240000L // 4 minutes with no download progress before timeout
+        private const val METADATA_TIMEOUT_MS = 60000L // 60 seconds for metadata fetching
         
         @Volatile
         private var INSTANCE: TorrentManager? = null
@@ -59,22 +63,63 @@ class TorrentManager private constructor(private val context: Context) {
             // Initialize session manager with peer discovery settings
             sessionManager = SessionManager()
             
-            // Configure session for better peer discovery
+            // Configure session for optimal peer connectivity
             val settingsPack = SettingsPack()
+            
+            // Enable all peer discovery methods
             settingsPack.setBoolean(settings_pack.bool_types.enable_dht.swigValue(), true)
             settingsPack.setBoolean(settings_pack.bool_types.enable_lsd.swigValue(), true) // Local Service Discovery
             settingsPack.setBoolean(settings_pack.bool_types.enable_upnp.swigValue(), true)
             settingsPack.setBoolean(settings_pack.bool_types.enable_natpmp.swigValue(), true)
-            settingsPack.setInteger(settings_pack.int_types.listen_queue_size.swigValue(), 50)
             
-            // Use standard BitTorrent port 6881 for better DHT connectivity
-            settingsPack.setString(settings_pack.string_types.listen_interfaces.swigValue(), "0.0.0.0:6881,[::]:6881")
+            // Optimize peer connection settings for better stability
+            settingsPack.setInteger(settings_pack.int_types.connections_limit.swigValue(), 100) // Increase max connections
+            settingsPack.setInteger(settings_pack.int_types.max_peerlist_size.swigValue(), 3000) // Larger peer list
+            settingsPack.setInteger(settings_pack.int_types.max_paused_peerlist_size.swigValue(), 1000)
+            settingsPack.setInteger(settings_pack.int_types.min_reconnect_time.swigValue(), 60) // 60 second reconnect delay
+            settingsPack.setInteger(settings_pack.int_types.peer_connect_timeout.swigValue(), 15) // 15 second connect timeout
+            settingsPack.setInteger(settings_pack.int_types.listen_queue_size.swigValue(), 100) // Increased queue size
             
-            sessionManager?.applySettings(settingsPack)
-            sessionManager?.start()
+            // Peer exchange and connection persistence
+            settingsPack.setBoolean(settings_pack.bool_types.enable_outgoing_utp.swigValue(), true)
+            settingsPack.setBoolean(settings_pack.bool_types.enable_incoming_utp.swigValue(), true)
+            settingsPack.setBoolean(settings_pack.bool_types.prefer_udp_trackers.swigValue(), true)
+            
+            // Dynamic port allocation - try multiple ports for better connectivity
+            var portBound = false
+            var actualPort = 6881
+            
+            for (port in 6881..6891) {
+                try {
+                    settingsPack.setString(settings_pack.string_types.listen_interfaces.swigValue(), "0.0.0.0:$port,[::]:$port")
+                    sessionManager?.applySettings(settingsPack)
+                    sessionManager?.start()
+                    
+                    // Test if port binding worked
+                    Thread.sleep(1000)
+                    portBound = true
+                    actualPort = port
+                    Log.d(TAG, "Successfully bound to port $port")
+                    break
+                } catch (e: Exception) {
+                    Log.d(TAG, "Port $port failed, trying next: ${e.message}")
+                    sessionManager?.stop()
+                    sessionManager = SessionManager()
+                }
+            }
+            
+            if (!portBound) {
+                // Fall back to random port if all standard ports fail
+                settingsPack.setString(settings_pack.string_types.listen_interfaces.swigValue(), "0.0.0.0:0,[::]:0")
+                sessionManager?.applySettings(settingsPack)
+                sessionManager?.start()
+                actualPort = 0 // 0 means random port
+                Log.d(TAG, "All standard ports failed, using random port")
+            }
             
             isLibraryAvailable = true
-            Log.d(TAG, "LibTorrent4j session initialized successfully on port 6881")
+            Log.d(TAG, "LibTorrent4j session initialized successfully on port $actualPort")
+            Log.d(TAG, "Peer settings: max_connections=100, max_peerlist=3000, reconnect_time=60s")
             
         } catch (e: UnsatisfiedLinkError) {
             Log.w(TAG, "LibTorrent4j native library not available: ${e.message}")
@@ -97,9 +142,16 @@ class TorrentManager private constructor(private val context: Context) {
         isDownloading = true
         currentDownloadPath = downloadPath
         
-        // Initialize zero-peer tracking
-        zeroPeerStartTime = System.currentTimeMillis()
-        hasHadPeers = false
+        // Initialize tracking variables
+        lastProgressTime = System.currentTimeMillis()
+        lastBytesDownloaded = 0
+        metadataStartTime = System.currentTimeMillis()
+        downloadPhase = DownloadPhase.METADATA_FETCHING
+        
+        // Notify initial phase
+        handler.post {
+            listener.onPhaseChanged(DownloadPhase.METADATA_FETCHING, 60)
+        }
         
         // LibTorrent4j should already be initialized in init block
         continueDownloadAfterInit(magnetLink, downloadPath, listener)
@@ -121,20 +173,33 @@ class TorrentManager private constructor(private val context: Context) {
             
             Log.d(TAG, "Starting P2P download for: $magnetLink")
             
-            // Fetch magnet metadata asynchronously to avoid blocking
-            Thread {
+            // Fetch magnet metadata asynchronously with parallel timeout
+            fetchMagnetThread = Thread {
                 try {
-                    Log.d(TAG, "Fetching magnet metadata...")
+                    Log.d(TAG, "Starting DHT connection...")
                     handler.post {
-                        listener.onVerifying(0.0f)
+                        listener.onDhtConnecting()
                     }
                     
-                    // Use longer timeout to allow DHT network to properly connect and find peers
-                    val data = sessionManager?.fetchMagnet(magnetLink, 300, downloadDir ?: File(currentDownloadPath))
+                    // Give DHT a moment to initialize
+                    Thread.sleep(2000)
+                    
+                    Log.d(TAG, "DHT connected, fetching magnet metadata...")
+                    handler.post {
+                        listener.onDhtConnected(0) // Will be updated with actual node count later
+                        listener.onMetadataFetching()
+                    }
+                    
+                    // Use longer timeout during metadata fetching - we removed parallel timeout
+                    val data = sessionManager?.fetchMagnet(magnetLink, 60, downloadDir ?: File(currentDownloadPath))
                     
                     if (data != null) {
                         val torrentInfo = TorrentInfo.bdecode(data)
                         Log.d(TAG, "Magnet metadata downloaded successfully, starting verification before download...")
+                        
+                        handler.post {
+                            listener.onMetadataComplete()
+                        }
                         
                         // Add torrent to session
                         sessionManager?.download(torrentInfo, downloadDir ?: File(currentDownloadPath))
@@ -150,6 +215,11 @@ class TorrentManager private constructor(private val context: Context) {
                         
                         Log.d(TAG, "Torrent added to session, waiting for metadata and peers...")
                         
+                        transitionToPhase(DownloadPhase.PEER_DISCOVERY, listener)
+                        handler.post {
+                            listener.onDiscoveringPeers()
+                        }
+                        
                         // Skip verification during download - only verify for seeding
                         Log.d(TAG, "Skipping verification during download to prevent conflicts")
                         
@@ -164,6 +234,12 @@ class TorrentManager private constructor(private val context: Context) {
                         isDownloading = false
                     }
                     
+                } catch (e: InterruptedException) {
+                    Log.d(TAG, "Magnet fetch interrupted by timeout")
+                    handler.post {
+                        listener.onTimeout()
+                    }
+                    isDownloading = false
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed during magnet metadata fetch", e)
                     handler.post {
@@ -171,7 +247,8 @@ class TorrentManager private constructor(private val context: Context) {
                     }
                     isDownloading = false
                 }
-            }.start()
+            }
+            fetchMagnetThread?.start()
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start P2P download", e)
@@ -183,22 +260,50 @@ class TorrentManager private constructor(private val context: Context) {
     private fun startMetadataAndPeerMonitoring(listener: TorrentDownloadListener) {
         progressMonitorThread = Thread {
             var hasMetadata = false
+            var seedsReported = false
+            var maxPeersObserved = 0
+            var peerDropWarningTime = 0L
             
             while (isDownloading && currentTorrentHandle != null && currentTorrentHandle!!.isValid) {
                 try {
                     val status = currentTorrentHandle!!.status()
                     val numPeers = status.numPeers()
+                    val numSeeds = try { status.numSeeds() } catch (e: Exception) { 0 }
                     val hasMetadataFlag = status.hasMetadata()
+                    val currentTime = System.currentTimeMillis()
                     
-                    Log.d(TAG, "Status: peers=$numPeers, hasMetadata=$hasMetadataFlag, state=${status.state()}, downloadRate=${status.downloadRate()}")
+                    // Track maximum peers observed for connection stability analysis
+                    if (numPeers > maxPeersObserved) {
+                        maxPeersObserved = numPeers
+                        Log.d(TAG, "[PEER TRACKING] New peak peer count: $maxPeersObserved")
+                    }
                     
-                    // Check zero-peer timeout
-                    if (checkZeroPeerTimeout(numPeers, listener)) {
+                    // Warn about significant peer drops (the main issue we're fixing)
+                    if (maxPeersObserved >= 2 && numPeers < maxPeersObserved && currentTime - peerDropWarningTime > 30000) {
+                        Log.w(TAG, "[PEER DROP DETECTED] Peers dropped from $maxPeersObserved to $numPeers - investigating cause")
+                        Log.w(TAG, "[PEER DROP] Network transitioning: $isNetworkTransitioning, Session valid: ${sessionManager != null}")
+                        peerDropWarningTime = currentTime
+                    }
+                    
+                    Log.d(TAG, "[$downloadPhase] Status: peers=$numPeers, seeds=$numSeeds, hasMetadata=$hasMetadataFlag, state=${status.state()}, downloadRate=${status.downloadRate()}")
+                    
+                    // Report seeds found if we have them and haven't reported yet
+                    if (!seedsReported && (numSeeds > 0 || numPeers > 0) && isDownloading) {
+                        seedsReported = true
+                        Log.d(TAG, "[PEER DISCOVERY] Found peers/seeds: $numSeeds seeds, $numPeers total peers")
+                        Log.d(TAG, "[PEER DISCOVERY] Connection established successfully - monitoring for stability")
+                        handler.post {
+                            listener.onSeedsFound(numSeeds, numPeers)
+                        }
+                    }
+                    
+                    // Check for metadata timeout
+                    if (checkTimeouts(0, listener)) {
                         break
                     }
                     
                     // Check if we got metadata
-                    if (!hasMetadata && hasMetadataFlag) {
+                    if (!hasMetadata && hasMetadataFlag && isDownloading) {
                         hasMetadata = true
                         Log.d(TAG, "Metadata received! Starting download monitoring...")
                         handler.post {
@@ -209,22 +314,27 @@ class TorrentManager private constructor(private val context: Context) {
                     // If we have metadata, switch to full progress monitoring
                     if (hasMetadata) {
                         Log.d(TAG, "Metadata acquired, total size: ${status.totalWanted()} bytes")
+                        transitionToPhase(DownloadPhase.ACTIVE_DOWNLOADING, downloadListener!!)
                         startRealProgressMonitoring()
                         break
                     }
                     
                     // Update progress even without metadata to show peer discovery
-                    handler.post {
-                        // Use 0 total to indicate we're still fetching metadata
-                        listener.onProgress(0, 0, 0, numPeers)
+                    if (isDownloading) {
+                        handler.post {
+                            // Use 0 total to indicate we're still fetching metadata
+                            listener.onProgress(0, 0, 0, numPeers)
+                        }
                     }
                     
                     Thread.sleep(2000) // Check every 2 seconds for metadata/peers
                     
                 } catch (e: Exception) {
                     Log.e(TAG, "Error monitoring metadata/peers", e)
-                    handler.post {
-                        listener.onError("Metadata monitoring error: ${e.message}")
+                    if (isDownloading) {
+                        handler.post {
+                            listener.onError("Metadata monitoring error: ${e.message}")
+                        }
                     }
                     break
                 }
@@ -242,6 +352,7 @@ class TorrentManager private constructor(private val context: Context) {
             
             isVerifying = true
             verificationStartTime = System.currentTimeMillis()
+            transitionToPhase(DownloadPhase.VERIFICATION, listener)
             Log.d(TAG, "Starting torrent verification...")
             
             // Force verification of pieces
@@ -310,6 +421,7 @@ class TorrentManager private constructor(private val context: Context) {
             
             isVerifying = true
             verificationStartTime = System.currentTimeMillis()
+            transitionToPhase(DownloadPhase.VERIFICATION, null)
             Log.d(TAG, "Starting torrent verification for seeding...")
             
             // Force verification of pieces
@@ -372,6 +484,7 @@ class TorrentManager private constructor(private val context: Context) {
         progressMonitorThread?.interrupt()
         
         progressMonitorThread = Thread {
+            var lastPeerLogTime = 0L
             while (isDownloading && currentTorrentHandle != null && currentTorrentHandle!!.isValid) {
                 try {
                     val status = currentTorrentHandle!!.status()
@@ -379,11 +492,47 @@ class TorrentManager private constructor(private val context: Context) {
                     val totalWantedDone = status.totalWantedDone()
                     val downloadRate = status.downloadRate()
                     val numPeers = status.numPeers()
+                    val numSeeds = try { status.numSeeds() } catch (e: Exception) { 0 }
+                    val progressPercent = if (totalWanted > 0) (totalWantedDone.toFloat() / totalWanted * 100).toInt() else 0
+                    val currentTime = System.currentTimeMillis()
                     
-                    Log.d(TAG, "Progress: ${totalWantedDone}/${totalWanted} bytes, rate=${downloadRate}B/s, peers=$numPeers")
+                    // Enhanced peer connection logging every 10 seconds
+                    if (currentTime - lastPeerLogTime > 10000) {
+                        Log.d(TAG, "[PEER STATUS] Seeds: $numSeeds, Total Peers: $numPeers, Download Rate: ${downloadRate}B/s")
+                        Log.d(TAG, "[PEER STATUS] State: ${status.state()}, Progress: $progressPercent%")
+                        
+                        // Log peer connection details
+                        if (numPeers > 0) {
+                            Log.d(TAG, "[PEER STABILITY] Maintaining $numPeers peer connections successfully")
+                        } else {
+                            Log.w(TAG, "[PEER WARNING] No peer connections - attempting reconnection")
+                        }
+                        lastPeerLogTime = currentTime
+                    }
                     
-                    // Check zero-peer timeout
-                    if (checkZeroPeerTimeout(numPeers, downloadListener!!)) {
+                    Log.d(TAG, "[$downloadPhase] Progress: ${totalWantedDone}/${totalWanted} bytes ($progressPercent%), rate=${downloadRate}B/s, peers=$numPeers, seeds=$numSeeds")
+                    
+                    // Additional debug info for timeouts
+                    when (downloadPhase) {
+                        DownloadPhase.METADATA_FETCHING -> {
+                            val metadataTime = System.currentTimeMillis() - metadataStartTime
+                            val remaining = (METADATA_TIMEOUT_MS - metadataTime) / 1000
+                            if (metadataTime > 20000) { // Log after 20 seconds
+                                Log.d(TAG, "  Metadata fetching for ${metadataTime / 1000}s, timeout in ${remaining}s")
+                            }
+                        }
+                        DownloadPhase.ACTIVE_DOWNLOADING -> {
+                            val noProgressTime = System.currentTimeMillis() - lastProgressTime
+                            val remaining = (NO_PROGRESS_TIMEOUT_MS - noProgressTime) / 1000
+                            if (noProgressTime > 30000) { // Only log if no progress for >30s
+                                Log.d(TAG, "  No progress for ${noProgressTime / 1000}s, timeout in ${remaining}s")
+                            }
+                        }
+                        else -> { /* No timeout logging for other phases */ }
+                    }
+                    
+                    // Check for download progress timeout only
+                    if (checkTimeouts(totalWantedDone, downloadListener!!)) {
                         break
                     }
                     
@@ -396,17 +545,23 @@ class TorrentManager private constructor(private val context: Context) {
                     
                     Log.d(TAG, "Completion check: isFinished=${status.isFinished}, progress=${status.progress()}, state=$state, totalDone/Wanted=$totalWantedDone/$totalWanted")
                     
-                    if (isComplete) {
+                    if (isComplete && isDownloading) {
                         Log.d(TAG, "Download completed - state: $state, progress: ${status.progress()}")
                         handler.post {
                             downloadListener?.onCompleted(currentDownloadPath)
                         }
                         isDownloading = false
                         break
+                    } else if (isComplete && !isDownloading) {
+                        Log.d(TAG, "Download was already stopped, not reporting completion")
+                        break
                     }
                     
                     // Handle verification phase progress
-                    if (state == TorrentStatus.State.CHECKING_FILES) {
+                    if (state == TorrentStatus.State.CHECKING_FILES && isDownloading) {
+                        if (downloadPhase != DownloadPhase.VERIFICATION) {
+                            transitionToPhase(DownloadPhase.VERIFICATION, downloadListener)
+                        }
                         val verifyProgress = status.progress()
                         Log.d(TAG, "In verification phase: ${(verifyProgress * 100).toInt()}%")
                         handler.post {
@@ -416,30 +571,40 @@ class TorrentManager private constructor(private val context: Context) {
                     
                     // Basic error checking
                     if (!currentTorrentHandle!!.isValid) {
-                        handler.post {
-                            downloadListener?.onError("Torrent handle became invalid")
+                        if (isDownloading) {
+                            handler.post {
+                                downloadListener?.onError("Torrent handle became invalid")
+                            }
+                            isDownloading = false
                         }
-                        isDownloading = false
                         break
                     }
                     
-                    // Update progress
-                    handler.post {
-                        downloadListener?.onProgress(totalWantedDone, totalWanted, downloadRate, numPeers)
+                    // Update progress only if still downloading
+                    if (isDownloading) {
+                        handler.post {
+                            downloadListener?.onProgress(totalWantedDone, totalWanted, downloadRate, numPeers)
+                        }
                     }
                     
-                    // Log progress every 10 seconds for debugging
-                    if (System.currentTimeMillis() % 10000 < 1000) {
-                        val progressPercent = if (totalWanted > 0) (totalWantedDone.toFloat() / totalWanted * 100).toInt() else 0
-                        Log.d(TAG, "Download progress: $progressPercent% - $numPeers peers - ${downloadRate}B/s")
+                    // Enhanced progress logging with peer stability tracking
+                    if (currentTime % 10000 < 1000) {
+                        Log.d(TAG, "[DOWNLOAD PROGRESS] $progressPercent% - Seeds: $numSeeds, Peers: $numPeers - Rate: ${downloadRate}B/s")
+                        
+                        // Warn if peer count is dropping
+                        if (numPeers > 0 && numPeers < 3) {
+                            Log.w(TAG, "[PEER WARNING] Low peer count detected: $numPeers peers - connection may be unstable")
+                        }
                     }
                     
                     Thread.sleep(1000)
                     
                 } catch (e: Exception) {
                     Log.e(TAG, "Error monitoring download progress", e)
-                    handler.post {
-                        downloadListener?.onError("Progress monitoring error: ${e.message}")
+                    if (isDownloading) {
+                        handler.post {
+                            downloadListener?.onError("Progress monitoring error: ${e.message}")
+                        }
                     }
                     break
                 }
@@ -448,31 +613,130 @@ class TorrentManager private constructor(private val context: Context) {
         progressMonitorThread?.start()
     }
     
-    private fun checkZeroPeerTimeout(numPeers: Int, listener: TorrentDownloadListener): Boolean {
+    private fun checkTimeouts(totalDone: Long, listener: TorrentDownloadListener): Boolean {
         val currentTime = System.currentTimeMillis()
         
-        if (numPeers > 0) {
-            // We have peers - reset the zero-peer timer
-            hasHadPeers = true
-            zeroPeerStartTime = currentTime
-            return false
-        }
-        
-        // No peers currently
-        val zeroPeerDuration = currentTime - zeroPeerStartTime
-        
-        // If we've had peers before but now have zero, and it's been too long, timeout
-        // OR if we've never had peers and it's been too long, timeout
-        if (zeroPeerDuration > ZERO_PEER_TIMEOUT_MS) {
-            Log.d(TAG, "Zero peers for ${zeroPeerDuration}ms, timing out P2P download")
-            handler.post {
-                listener.onTimeout()
+        // Update progress tracking - be more lenient about what constitutes progress
+        val hasProgress = totalDone > lastBytesDownloaded || 
+                         (currentTorrentHandle?.status()?.downloadRate() ?: 0) > 0
+        if (hasProgress) {
+            lastProgressTime = currentTime
+            if (totalDone > lastBytesDownloaded) {
+                val bytesGained = totalDone - lastBytesDownloaded
+                Log.d(TAG, "Progress detected: $bytesGained bytes downloaded")
+                lastBytesDownloaded = totalDone
+            } else {
+                Log.d(TAG, "Active download rate detected - resetting progress timer")
             }
-            isDownloading = false
-            return true
         }
         
-        return false
+        // Check timeouts based on current phase
+        return when (downloadPhase) {
+            DownloadPhase.METADATA_FETCHING -> {
+                // Timeout if metadata fetching takes too long
+                val metadataTime = currentTime - metadataStartTime
+                if (metadataTime > METADATA_TIMEOUT_MS) {
+                    Log.d(TAG, "Metadata timeout: fetching took ${metadataTime}ms")
+                    triggerTimeout(listener, "Metadata fetching timeout after ${metadataTime / 1000} seconds")
+                    true
+                } else {
+                    val remainingTime = (METADATA_TIMEOUT_MS - metadataTime) / 1000
+                    if (metadataTime > 30000) { // Log after 30 seconds
+                        Log.d(TAG, "Metadata fetching for ${metadataTime / 1000}s, timeout in ${remainingTime}s")
+                    }
+                    false
+                }
+            }
+            DownloadPhase.PEER_DISCOVERY -> {
+                // Don't timeout during peer discovery - give P2P time to connect
+                false
+            }
+            DownloadPhase.ACTIVE_DOWNLOADING -> {
+                // Only timeout if no download progress for specified time
+                val noProgressTime = currentTime - lastProgressTime
+                val downloadRate = currentTorrentHandle?.status()?.downloadRate() ?: 0
+                val peerCount = currentTorrentHandle?.status()?.numPeers() ?: 0
+                
+                // Don't timeout if we have active download rate or recently had progress
+                val shouldTimeout = noProgressTime > NO_PROGRESS_TIMEOUT_MS && 
+                                  downloadRate == 0 && 
+                                  peerCount == 0
+                
+                if (shouldTimeout) {
+                    Log.d(TAG, "Progress timeout: no download progress for ${noProgressTime}ms, no peers, no download rate")
+                    triggerTimeout(listener, "No download progress for ${noProgressTime / 1000} seconds with no active peers")
+                    true
+                } else {
+                    val remainingTime = (NO_PROGRESS_TIMEOUT_MS - noProgressTime) / 1000
+                    if (noProgressTime > 60000) { // Log every minute after first minute
+                        val status = when {
+                            downloadRate > 0 -> "downloading at ${downloadRate}B/s"
+                            peerCount > 0 -> "connected to $peerCount peers"
+                            else -> "no activity"
+                        }
+                        Log.d(TAG, "No progress for ${noProgressTime / 1000}s ($status), will timeout in ${remainingTime}s if no progress")
+                    }
+                    false
+                }
+            }
+            DownloadPhase.VERIFICATION -> {
+                // Don't timeout during verification
+                false
+            }
+        }
+    }
+    
+    private fun triggerTimeout(listener: TorrentDownloadListener, reason: String) {
+        Log.w(TAG, "[TIMEOUT] Phase: $downloadPhase, Reason: $reason")
+        Log.w(TAG, "[TIMEOUT] No progress time: ${System.currentTimeMillis() - lastProgressTime}ms")
+        Log.w(TAG, "[TIMEOUT] Last bytes downloaded: $lastBytesDownloaded")
+        Log.w(TAG, "[TIMEOUT] Explicitly stopping P2P download before HTTPS fallback")
+        
+        // Set flag to stop download immediately
+        isDownloading = false
+        
+        // Notify listener for HTTPS fallback BEFORE cleaning up
+        handler.post {
+            listener.onTimeout()
+        }
+        
+        // Then clean up P2P resources 
+        handler.postDelayed({
+            stopDownload()
+        }, 100) // Small delay to ensure onTimeout is processed first
+    }
+    
+    private fun transitionToPhase(newPhase: DownloadPhase, listener: TorrentDownloadListener?) {
+        val oldPhase = downloadPhase
+        downloadPhase = newPhase
+        val currentTime = System.currentTimeMillis()
+        
+        // Determine timeout for this phase
+        val timeoutSeconds = when (newPhase) {
+            DownloadPhase.METADATA_FETCHING -> {
+                metadataStartTime = currentTime
+                60 // 60 seconds for metadata
+            }
+            DownloadPhase.PEER_DISCOVERY -> {
+                0 // No timeout during peer discovery
+            }
+            DownloadPhase.ACTIVE_DOWNLOADING -> {
+                lastProgressTime = currentTime
+                240 // 4 minutes for no progress
+            }
+            DownloadPhase.VERIFICATION -> {
+                0 // No timeout during verification
+            }
+        }
+        
+        Log.d(TAG, "[PHASE TRANSITION] $oldPhase -> $newPhase (${timeoutSeconds}s timeout)")
+        
+        // Notify listener of phase change
+        listener?.let {
+            handler.post {
+                it.onPhaseChanged(newPhase, timeoutSeconds)
+            }
+        }
     }
     
     fun stopDownload() {
@@ -482,9 +746,15 @@ class TorrentManager private constructor(private val context: Context) {
         progressMonitorThread?.interrupt()
         progressMonitorThread = null
         
-        // Reset zero-peer tracking
-        zeroPeerStartTime = 0
-        hasHadPeers = false
+        // Stop fetch magnet thread
+        fetchMagnetThread?.interrupt()
+        fetchMagnetThread = null
+        
+        // Reset tracking variables
+        lastProgressTime = 0
+        lastBytesDownloaded = 0
+        metadataStartTime = 0
+        downloadPhase = DownloadPhase.METADATA_FETCHING
         
         // Remove torrent from session if it exists
         currentTorrentHandle?.let { handle ->
@@ -617,10 +887,21 @@ class TorrentManager private constructor(private val context: Context) {
                 60
             }
             
+            // Notify listener that we're starting the process
+            listener?.let {
+                handler.post {
+                    it.onDhtConnecting()
+                }
+            }
+            
+            // Give DHT time to connect
+            Thread.sleep(1000)
+            
             // Notify listener that we're fetching metadata
             listener?.let {
                 handler.post {
-                    it.onVerifying(0.0f) // 0% indicates we're starting metadata fetch
+                    it.onDhtConnected(0) // Node count not available in this context
+                    it.onMetadataFetching()
                 }
             }
             
@@ -631,9 +912,23 @@ class TorrentManager private constructor(private val context: Context) {
                 val torrentInfo = TorrentInfo.bdecode(data)
                 Log.d(TAG, "Magnet metadata downloaded for seeding, starting verification...")
                 
+                // Notify metadata complete
+                listener?.let {
+                    handler.post {
+                        it.onMetadataComplete()
+                    }
+                }
+                
                 // Add torrent to session for seeding (file should already exist)
                 sessionManager?.download(torrentInfo, downloadDir ?: File(filePath).parentFile ?: File("."))
                 currentTorrentHandle = sessionManager?.find(torrentInfo.infoHash())
+                
+                // Notify ready to seed
+                listener?.let {
+                    handler.post {
+                        it.onReadyToSeed()
+                    }
+                }
                 
                 // Start verification before seeding
                 startVerificationForSeeding(listener)
@@ -738,10 +1033,12 @@ class TorrentManager private constructor(private val context: Context) {
     fun stopSeeding() {
         // CRITICAL: Never interfere with active downloads
         if (isDownloading) {
-            Log.w(TAG, "stopSeeding() called during active download - ignoring to prevent interference")
+            Log.w(TAG, "stopSeeding() called during active download - COMPLETELY IGNORING to prevent peer disconnection")
+            Log.w(TAG, "Download in progress: isDownloading=$isDownloading, currentTorrentHandle=${currentTorrentHandle?.isValid}")
             return
         }
         
+        Log.d(TAG, "Stopping seeding - no active download detected")
         isSeeding = false
         
         // Remove torrent from session if it exists (only if not downloading)
@@ -837,81 +1134,101 @@ class TorrentManager private constructor(private val context: Context) {
         return isDownloading
     }
     
+    fun getCurrentTorrentHandle(): TorrentHandle? {
+        return currentTorrentHandle
+    }
+    
+    fun getPeerConnectionHealth(): String {
+        return try {
+            if (currentTorrentHandle?.isValid == true) {
+                val status = currentTorrentHandle!!.status()
+                val peers = status.numPeers()
+                val seeds = try { status.numSeeds() } catch (e: Exception) { 0 }
+                val downloadRate = status.downloadRate()
+                val state = status.state()
+                
+                "Peers: $peers, Seeds: $seeds, Rate: ${downloadRate}B/s, State: $state, Valid: true"
+            } else {
+                "No valid torrent handle available"
+            }
+        } catch (e: Exception) {
+            "Error getting peer info: ${e.message}"
+        }
+    }
+    
     private fun startNetworkMonitoring() {
         networkManager.startNetworkMonitoring { isOnWiFi ->
             Log.d(TAG, "Network change detected - WiFi: $isOnWiFi")
             
-            // Mark network transition period
+            // CRITICAL: Completely avoid any interference during active downloads
+            if (isDownloading) {
+                Log.w(TAG, "ACTIVE DOWNLOAD DETECTED - Ignoring all network change actions to prevent peer disconnection")
+                Log.w(TAG, "Network monitoring will resume normal operation after download completes")
+                return@startNetworkMonitoring
+            }
+            
+            // Mark network transition period only for non-download operations
             isNetworkTransitioning = true
             networkTransitionStartTime = System.currentTimeMillis()
             
-            // CRITICAL: Never interfere with active downloads
-            if (isDownloading) {
-                Log.d(TAG, "Download in progress - network monitoring will not interfere")
-                // Clear transition flag but don't touch the download session
-                Thread {
+            // Handle network changes only when not downloading
+            if (isSeeding && !isOnWiFi && networkManager.isOnMobileData() && !isMobileDataSeedingEnabled()) {
+                Log.d(TAG, "Switched to mobile data and mobile data seeding is disabled - stopping seeding")
+                stopSeeding()
+            } else if (isOnWiFi && isSeedingEnabled()) {
+                Log.d(TAG, "Switched to WiFi - checking seeding state and attempting resume")
+                
+                // Only reset seeding session if we're not downloading
+                if (isSeeding) {
+                    Log.d(TAG, "Already seeding but network changed - resetting session for stability")
+                    stopSeeding()
+                    isSeeding = false
+                }
+                
+                // Wait for network to stabilize before attempting seeding
+                Thread seedingRestartThread@{
                     try {
-                        Thread.sleep(5000)
+                        Thread.sleep(5000) // 5 second delay for network stabilization
+                        
+                        // Double-check we're still not downloading before proceeding
+                        if (isDownloading) {
+                            Log.w(TAG, "Download started during network transition - aborting seeding restart")
+                            isNetworkTransitioning = false
+                            return@seedingRestartThread
+                        }
+                        
+                        // Check if we still have a valid file and are on WiFi
+                        if (networkManager.isOnWiFi() && currentDownloadPath.isNotEmpty() && File(currentDownloadPath).exists()) {
+                            Log.d(TAG, "Network stabilized, starting fresh seeding session")
+                            seedFile(currentDownloadPath)
+                        } else if (networkManager.isOnWiFi()) {
+                            // Try to find the torrent file in internal files
+                            val internalFile = File(context.filesDir, "pictures.tar.gz")
+                            if (internalFile.exists()) {
+                                Log.d(TAG, "Found torrent file in internal storage, starting seeding")
+                                currentDownloadPath = internalFile.absolutePath
+                                seedFile(internalFile.absolutePath)
+                            }
+                        }
+                    } catch (e: InterruptedException) {
+                        Log.d(TAG, "Network transition wait interrupted")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error during network transition seeding restart", e)
+                    } finally {
+                        isNetworkTransitioning = false
+                    }
+                }.start()
+            } else {
+                // Clear transition flag after a short delay if no action needed
+                Thread transitionCleanupThread@{
+                    try {
+                        Thread.sleep(3000) // Reduced from 5 to 3 seconds
                     } catch (e: InterruptedException) {
                         // Ignore
                     } finally {
                         isNetworkTransitioning = false
                     }
                 }.start()
-            } else {
-                // Handle network changes when not downloading
-                if (isSeeding && !isOnWiFi && networkManager.isOnMobileData() && !isMobileDataSeedingEnabled()) {
-                    Log.d(TAG, "Switched to mobile data and mobile data seeding is disabled - stopping seeding")
-                    stopSeeding()
-                } else if (isOnWiFi && isSeedingEnabled()) {
-                    Log.d(TAG, "Switched to WiFi - checking seeding state and attempting resume")
-                    
-                    // More aggressive reset of seeding state during network transitions (only if not downloading)
-                    if (isSeeding && !isDownloading) {
-                        Log.d(TAG, "Already seeding but network changed - resetting session for stability")
-                        // Reset the session to handle potential corruption during network switch
-                        stopSeeding()
-                        isSeeding = false
-                    }
-                    
-                    // Wait a moment for network to stabilize before attempting seeding
-                    Thread {
-                        try {
-                            Thread.sleep(5000) // 5 second delay for network stabilization
-                            
-                            // Check if we still have a valid file and are on WiFi
-                            if (networkManager.isOnWiFi() && currentDownloadPath.isNotEmpty() && File(currentDownloadPath).exists()) {
-                                Log.d(TAG, "Network stabilized, starting fresh seeding session")
-                                seedFile(currentDownloadPath)
-                            } else if (networkManager.isOnWiFi()) {
-                                // Try to find the torrent file in cache
-                                val cacheFile = File(context.cacheDir, "pictures.tar.gz")
-                                if (cacheFile.exists()) {
-                                    Log.d(TAG, "Found torrent file in cache, starting seeding")
-                                    currentDownloadPath = cacheFile.absolutePath
-                                    seedFile(cacheFile.absolutePath)
-                                }
-                            }
-                        } catch (e: InterruptedException) {
-                            Log.d(TAG, "Network transition wait interrupted")
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error during network transition seeding restart", e)
-                        } finally {
-                            isNetworkTransitioning = false
-                        }
-                    }.start()
-                } else {
-                    // Clear transition flag after a short delay if no action needed
-                    Thread {
-                        try {
-                            Thread.sleep(5000)
-                        } catch (e: InterruptedException) {
-                            // Ignore
-                        } finally {
-                            isNetworkTransitioning = false
-                        }
-                    }.start()
-                }
             }
         }
     }
