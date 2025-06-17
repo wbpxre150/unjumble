@@ -36,19 +36,9 @@ Builds:
       - update-java-alternatives -a
     gradle:
       - yes
-  - versionName: 4
-    versionCode: 4
-    commit: v4
-    subdir: app
-    sudo:
-      - apt-get update
-      - apt-get install -y openjdk-17-jdk-headless
-      - update-java-alternatives -a
-    gradle:
-      - yes
-  - versionName: 6.0
-    versionCode: 6
-    commit: v6
+  - versionName: 7.0
+    versionCode: 7
+    commit: v7.0
     subdir: app
     sudo:
       - apt-get update
@@ -61,5 +51,5 @@ AllowedAPKSigningKeys: 480b18292c6be43e3829199c4d6a169b773862144fed576c303f634c4
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags
-CurrentVersion: 6.0
-CurrentVersionCode: 6
+CurrentVersion: 7.0
+CurrentVersionCode: 7
