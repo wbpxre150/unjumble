@@ -285,6 +285,7 @@ class TorrentManager private constructor(private val context: Context) {
         
         // Enhanced peer discovery settings
         settingsPack.setBoolean(settings_pack.bool_types.enable_lsd.swigValue(), true)
+        // PEX is enabled by default through session plugins - no explicit setting needed
         settingsPack.setBoolean(settings_pack.bool_types.enable_upnp.swigValue(), true)
         settingsPack.setBoolean(settings_pack.bool_types.enable_natpmp.swigValue(), true)
         settingsPack.setBoolean(settings_pack.bool_types.enable_incoming_utp.swigValue(), true)

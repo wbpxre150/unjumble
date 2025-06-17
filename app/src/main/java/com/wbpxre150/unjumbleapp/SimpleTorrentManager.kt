@@ -101,9 +101,13 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
         settings.setInteger(settings_pack.int_types.active_downloads.swigValue(), 4)
         settings.setInteger(settings_pack.int_types.active_seeds.swigValue(), 4)
         
-        // Enable UPnP and NAT-PMP
+        // Enhanced peer discovery settings
+        settings.setBoolean(settings_pack.bool_types.enable_lsd.swigValue(), true)
+        // PEX is enabled by default through session plugins - no explicit setting needed
         settings.setBoolean(settings_pack.bool_types.enable_upnp.swigValue(), true)
         settings.setBoolean(settings_pack.bool_types.enable_natpmp.swigValue(), true)
+        settings.setBoolean(settings_pack.bool_types.enable_incoming_utp.swigValue(), true)
+        settings.setBoolean(settings_pack.bool_types.enable_outgoing_utp.swigValue(), true)
         
         // Alert configuration for metadata and progress tracking
         settings.setInteger(
