@@ -23,6 +23,10 @@ interface TorrentDownloadListener {
     fun onMetadataComplete()
     fun onReadyToSeed()
     
+    // DHT diagnostics callbacks for detailed status reporting
+    fun onDhtDiagnostic(message: String)
+    fun onSessionDiagnostic(message: String)
+    
     // Phase-based communication to prevent timeout conflicts
     fun onPhaseChanged(phase: DownloadPhase, timeoutSeconds: Int)
 }

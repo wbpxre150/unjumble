@@ -18,7 +18,7 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
     private lateinit var progressBar: ProgressBar
     private lateinit var statusTextView: TextView
     private lateinit var timeRemainingTextView: TextView
-    private lateinit var torrentManager: TorrentManager
+    private lateinit var torrentManager: SimpleTorrentManager
     private var isP2PAttemptFinished = false
     private var downloadStartTime: Long = 0
     private var lastProgressUpdate: Long = 0
@@ -32,6 +32,11 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
     private var connectedPeers = 0
     private var hasActiveProgress = false
     private var lastProgressBytes: Long = 0
+    private var dhtNodeCount = 0
+    private var seedCount = 0
+    private var leecherCount = 0
+    private var maxPeersObserved = 0
+    private var peerSearchStartTime = 0L
     private val networkManager = NetworkManager.getInstance(this)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -51,7 +56,7 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         progressBar = findViewById(R.id.progressBar)
         statusTextView = findViewById(R.id.statusTextView)
         timeRemainingTextView = findViewById(R.id.timeRemainingTextView)
-        torrentManager = TorrentManager.getInstance(this)
+        torrentManager = SimpleTorrentManager.getInstance(this)
 
         GlobalScope.launch(Dispatchers.Main) {
             try {
@@ -153,27 +158,47 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
             else -> " [P2P:6881]" // Default when library not loaded or uninitialized
         }
         
+        // Track maximum peers observed for better diagnostics
+        if (peers > maxPeersObserved) {
+            maxPeersObserved = peers
+        }
+        
         statusTextView.text = when (currentPhase) {
             DownloadPhase.METADATA_FETCHING -> {
                 if (total > 0) "File info received, starting download...$portStr" 
                 else if (totalPeersFound > 0) {
-                    "Fetching file information ($connectedPeers/$totalPeersFound peers)$portStr"
+                    "Fetching file info ($connectedPeers/$totalPeersFound peers, seeds:$seedCount)$portStr"
+                } else if (peers > 0) {
+                    "Fetching file info from $peers peers$portStr"
+                } else if (isDhtConnected && dhtNodeCount > 0) {
+                    "Searching for peers (DHT: $dhtNodeCount nodes)$portStr"
                 } else {
-                    "Fetching file information from $peers peers$portStr"
+                    "Connecting to DHT network...$portStr"
                 }
             }
             DownloadPhase.PEER_DISCOVERY -> {
                 if (totalPeersFound > 0) {
-                    "Connecting to peers ($connectedPeers/$totalPeersFound found)$portStr"
-                } else {
+                    "Connecting to peers ($connectedPeers/$totalPeersFound, S:$seedCount L:$leecherCount)$portStr"
+                } else if (peers > 0) {
                     "Found $peers peers, establishing connections...$portStr"
+                } else if (isDhtConnected && dhtNodeCount > 0) {
+                    val searchTime = (System.currentTimeMillis() - peerSearchStartTime) / 1000
+                    "Searching for peers (${searchTime}s, DHT:$dhtNodeCount nodes)$portStr"
+                } else {
+                    "No peers found, checking DHT connectivity...$portStr"
                 }
             }
             DownloadPhase.ACTIVE_DOWNLOADING -> {
-                if (total > 0) {
-                    "Downloading: $progress% (${downloadedMB}MB/${totalMB}MB) from $peers peers$portStr"
+                if (total > 0 && downloadRate > 0) {
+                    // Show progress and speed when actively downloading
+                    "Downloading: $progress% (${downloadedMB}MB/${totalMB}MB) at ${downloadSpeedKB}KB/s$portStr"
+                } else if (total > 0) {
+                    // Show progress without speed when paused/slow
+                    "Downloaded: $progress% (${downloadedMB}MB/${totalMB}MB) from $peers peers$portStr"
+                } else if (peers > 0) {
+                    "Connected to $peers peers, waiting for data...$portStr"
                 } else {
-                    "Preparing download from $peers peers...$portStr"
+                    "No active peers (max seen: $maxPeersObserved), reconnecting...$portStr"
                 }
             }
             DownloadPhase.VERIFICATION -> {
@@ -181,20 +206,43 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
             }
         }
         
-        timeRemainingTextView.text = if (downloadRate > 0) {
-            "Speed: ${downloadSpeedKB}KB/s | ETA: ${formatTime(estimatedSeconds)}"
+        timeRemainingTextView.text = if (downloadRate > 0 && currentPhase == DownloadPhase.ACTIVE_DOWNLOADING) {
+            // During active downloading, show detailed speed and ETA info
+            "Speed: ${downloadSpeedKB}KB/s | ETA: ${formatTime(estimatedSeconds)} | Peers: $peers"
+        } else if (downloadRate > 0) {
+            // During other phases with download rate, show basic speed
+            "Speed: ${downloadSpeedKB}KB/s | Peers: $peers"
         } else if (peers > 0) {
             when (currentPhase) {
-                DownloadPhase.METADATA_FETCHING -> "Getting file details from peers..."
-                DownloadPhase.PEER_DISCOVERY -> "Connecting to $peers available peers..."
-                DownloadPhase.ACTIVE_DOWNLOADING -> "Connected to $peers peers - waiting for data..."
+                DownloadPhase.METADATA_FETCHING -> "Getting file details from $peers peers..."
+                DownloadPhase.PEER_DISCOVERY -> "Connecting to $peers peers (seeds:$seedCount, leechers:$leecherCount)..."
+                DownloadPhase.ACTIVE_DOWNLOADING -> "Connected to $peers peers - waiting for data transfer..."
                 DownloadPhase.VERIFICATION -> "Checking file integrity..."
             }
         } else {
             when (currentPhase) {
-                DownloadPhase.METADATA_FETCHING -> "Searching for peers with this file..."
-                DownloadPhase.PEER_DISCOVERY -> "No peers found yet, still searching..."
-                DownloadPhase.ACTIVE_DOWNLOADING -> "No active peers, reconnecting..."
+                DownloadPhase.METADATA_FETCHING -> {
+                    if (isDhtConnected && dhtNodeCount > 0) {
+                        "DHT connected ($dhtNodeCount nodes) - searching for peers..."
+                    } else {
+                        "Establishing DHT connection to find peers..."
+                    }
+                }
+                DownloadPhase.PEER_DISCOVERY -> {
+                    val searchTime = (System.currentTimeMillis() - peerSearchStartTime) / 1000
+                    if (isDhtConnected && dhtNodeCount > 0) {
+                        "No peers found after ${searchTime}s (DHT: $dhtNodeCount nodes, max seen: $maxPeersObserved)"
+                    } else {
+                        "DHT connection issues - peer discovery limited"
+                    }
+                }
+                DownloadPhase.ACTIVE_DOWNLOADING -> {
+                    if (maxPeersObserved > 0) {
+                        "Lost connection to peers (previously had $maxPeersObserved)"
+                    } else {
+                        "No peers available for download"
+                    }
+                }
                 DownloadPhase.VERIFICATION -> "Verifying downloaded data..."
             }
         }
@@ -211,6 +259,11 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         currentPeerCount = 0
         totalPeersFound = 0
         connectedPeers = 0
+        dhtNodeCount = 0
+        seedCount = 0
+        leecherCount = 0
+        maxPeersObserved = 0
+        peerSearchStartTime = 0L
         hasActiveProgress = false
         lastProgressBytes = 0
         GlobalScope.launch(Dispatchers.Main) {
@@ -236,6 +289,11 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         currentPeerCount = 0
         totalPeersFound = 0
         connectedPeers = 0
+        dhtNodeCount = 0
+        seedCount = 0
+        leecherCount = 0
+        maxPeersObserved = 0
+        peerSearchStartTime = 0L
         hasActiveProgress = false
         lastProgressBytes = 0
         
@@ -265,6 +323,11 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         currentPeerCount = 0
         totalPeersFound = 0
         connectedPeers = 0
+        dhtNodeCount = 0
+        seedCount = 0
+        leecherCount = 0
+        maxPeersObserved = 0
+        peerSearchStartTime = 0L
         hasActiveProgress = false
         lastProgressBytes = 0
         
@@ -304,25 +367,37 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
 
     override fun onDhtConnected(nodeCount: Int) {
         isDhtConnected = true
+        dhtNodeCount = nodeCount
         android.util.Log.d("DownloadActivity", "DHT connected with $nodeCount nodes")
-        statusTextView.text = "DHT network connected"
-        timeRemainingTextView.text = if (nodeCount > 0) "Connected to $nodeCount DHT nodes" else "DHT connection established"
+        statusTextView.text = "DHT network connected ($nodeCount nodes)"
+        timeRemainingTextView.text = if (nodeCount > 0) "Connected to $nodeCount DHT nodes - starting peer search" else "DHT connection established - limited peer discovery"
     }
 
     override fun onDiscoveringPeers() {
+        peerSearchStartTime = System.currentTimeMillis()
         android.util.Log.d("DownloadActivity", "Discovering peers...")
-        statusTextView.text = "Searching for peers..."
+        statusTextView.text = if (isDhtConnected && dhtNodeCount > 0) {
+            "Searching for peers (DHT: $dhtNodeCount nodes)..."
+        } else {
+            "Searching for peers (DHT status unknown)..."
+        }
         timeRemainingTextView.text = "Looking for other users sharing this file"
     }
 
     override fun onSeedsFound(seedCount: Int, peerCount: Int) {
-        android.util.Log.d("DownloadActivity", "Found $seedCount seeds, $peerCount total peers")
+        this.seedCount = seedCount
+        this.leecherCount = peerCount - seedCount
         totalPeersFound = peerCount
-        statusTextView.text = "Found peers: $seedCount seeds, ${peerCount - seedCount} leechers"
-        timeRemainingTextView.text = "Connecting to $peerCount peers for download"
+        
+        android.util.Log.d("DownloadActivity", "Found $seedCount seeds, $peerCount total peers (${this.leecherCount} leechers)")
+        statusTextView.text = "Found $peerCount peers: $seedCount seeds, ${this.leecherCount} leechers"
+        timeRemainingTextView.text = "Establishing connections to $peerCount peers for download"
         
         // Update current peer count
         currentPeerCount = peerCount
+        if (peerCount > maxPeersObserved) {
+            maxPeersObserved = peerCount
+        }
     }
 
     override fun onMetadataFetching() {
@@ -368,6 +443,19 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
                 timeRemainingTextView.text = "Checking file integrity"
             }
         }
+    }
+
+    // DHT diagnostics callbacks to show detailed status in UI
+    override fun onDhtDiagnostic(message: String) {
+        android.util.Log.d("DownloadActivity", "DHT Diagnostic: $message")
+        statusTextView.text = "DHT Status: $message"
+        // Show peer count information instead of generic diagnostics message
+        timeRemainingTextView.text = "Found: $totalPeersFound peers | Connected: $connectedPeers peers"
+    }
+
+    override fun onSessionDiagnostic(message: String) {
+        android.util.Log.d("DownloadActivity", "Session Diagnostic: $message")
+        timeRemainingTextView.text = "Session: $message"
     }
 
 
