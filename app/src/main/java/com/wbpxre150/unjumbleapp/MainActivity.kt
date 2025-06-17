@@ -278,7 +278,8 @@ class MainActivity : Activity(), TorrentDownloadListener {
 
     override fun onDestroy() {
         super.onDestroy()
-        torrentManager?.stopDownload()
+        // Full shutdown with session state persistence like FrostWire
+        torrentManager?.shutdown()
     }
 
     override fun onResume() {
@@ -1201,6 +1202,15 @@ class MainActivity : Activity(), TorrentDownloadListener {
         // MainActivity doesn't need to do anything special with phase changes
         // since it only uses TorrentManager for seeding, not downloading
         android.util.Log.d("MainActivity", "Torrent phase changed to $phase with ${timeoutSeconds}s timeout")
+    }
+
+    // DHT diagnostics callbacks - not needed for MainActivity but required by interface
+    override fun onDhtDiagnostic(message: String) {
+        android.util.Log.d("MainActivity", "DHT Diagnostic: $message")
+    }
+
+    override fun onSessionDiagnostic(message: String) {
+        android.util.Log.d("MainActivity", "Session Diagnostic: $message")
     }
     
     private fun checkSeedingInitialization() {
