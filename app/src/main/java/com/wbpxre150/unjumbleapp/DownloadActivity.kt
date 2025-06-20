@@ -143,6 +143,19 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         hasActiveProgress = downloaded > lastProgressBytes
         lastProgressBytes = downloaded
         
+        // Save progress to SharedPreferences for resume capability
+        if (total > 0) {
+            val resumePrefs = getSharedPreferences("torrent_resume", MODE_PRIVATE)
+            resumePrefs.edit().apply {
+                putBoolean("has_resume_data", true)
+                putLong("downloaded_size", downloaded)
+                putLong("total_size", total)
+                putString("download_path", File(filesDir, "pictures.tar.gz").absolutePath)
+                putLong("last_updated", System.currentTimeMillis())
+                apply()
+            }
+        }
+        
         val progress = if (total > 0) (downloaded.toFloat() / total * 100).toInt() else 0
         progressBar.progress = progress
         
@@ -577,12 +590,13 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
     override fun onDestroy() {
         super.onDestroy()
         
-        // Ensure cleanup of network monitoring and torrent manager
+        // Ensure cleanup of network monitoring
         stopNetworkMonitoring()
         
-        if (this::torrentManager.isInitialized) {
-            torrentManager.shutdown()
-        }
+        // DO NOT shutdown torrent manager here - it's a singleton that MainActivity needs
+        // The session should persist across activities for proper P2P functionality
+        // Only shut down when the entire application terminates
+        android.util.Log.d("DownloadActivity", "Activity destroyed, keeping torrent session alive for MainActivity")
     }
 
 

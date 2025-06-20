@@ -119,7 +119,10 @@ class MainActivity : Activity(), TorrentDownloadListener {
         // Initialize SimpleTorrentManager for seeding (after UI is set up)
         android.util.Log.d("MainActivity", "Initializing SimpleTorrentManager...")
         torrentManager = SimpleTorrentManager.getInstance(this)
-        android.util.Log.d("MainActivity", "SimpleTorrentManager initialized, library loaded: ${torrentManager?.isLibraryLoaded()}")
+        
+        // Ensure session is ready for operations
+        val sessionReady = torrentManager!!.ensureSessionReady()
+        android.util.Log.d("MainActivity", "SimpleTorrentManager initialized, session ready: $sessionReady, library loaded: ${torrentManager?.isLibraryLoaded()}")
         
         // Migrate existing cache file to internal storage if it exists
         migrateCacheFileToInternalStorage()
@@ -226,9 +229,24 @@ class MainActivity : Activity(), TorrentDownloadListener {
             }
         } else {
             if (downloadedFile.exists()) {
-                android.util.Log.w("MainActivity", "Torrent file exists but hash verification failed - deleting corrupted file")
-                downloadedFile.delete()
-                peerCountTextView.text = "Torrent: Corrupted file detected, re-downloading..."
+                // Check if we have SharedPreferences resume data to continue the download
+                val resumePrefs = getSharedPreferences("torrent_resume", MODE_PRIVATE)
+                val hasResumeData = resumePrefs.getBoolean("has_resume_data", false)
+                
+                if (hasResumeData) {
+                    val downloadedSize = resumePrefs.getLong("downloaded_size", 0)
+                    val totalSize = resumePrefs.getLong("total_size", 0)
+                    val progressPercent = if (totalSize > 0) (downloadedSize.toFloat() / totalSize * 100).toInt() else 0
+                    
+                    android.util.Log.w("MainActivity", "Partial download detected: ${progressPercent}% complete - preserving file for resume")
+                    peerCountTextView.text = "Torrent: Partial download found (${progressPercent}%) - will resume..."
+                    
+                    // Don't delete the partial file - preserve it for resuming
+                } else {
+                    android.util.Log.w("MainActivity", "Torrent file exists but hash verification failed - deleting corrupted file")
+                    downloadedFile.delete()
+                    peerCountTextView.text = "Torrent: Corrupted file detected, re-downloading..."
+                }
             } else {
                 android.util.Log.d("MainActivity", "No torrent file found, starting background download")
                 peerCountTextView.text = "Torrent: No archive file, downloading..."
@@ -1008,8 +1026,25 @@ class MainActivity : Activity(), TorrentDownloadListener {
             return
         }
         
-        android.util.Log.d("MainActivity", "Starting background P2P download for seeding")
-        peerCountTextView.text = "Torrent: Starting background download..."
+        // Check for resume data first (same logic as DownloadActivity)
+        val resumePrefs = getSharedPreferences("torrent_resume", MODE_PRIVATE)
+        val hasResumeData = resumePrefs.getBoolean("has_resume_data", false)
+        
+        if (hasResumeData) {
+            val downloadedSize = resumePrefs.getLong("downloaded_size", 0)
+            val totalSize = resumePrefs.getLong("total_size", 0)
+            
+            val downloadedMB = downloadedSize / (1024 * 1024)
+            val totalMB = totalSize / (1024 * 1024)
+            val progressPercent = if (totalSize > 0) (downloadedSize.toFloat() / totalSize * 100).toInt() else 0
+            
+            android.util.Log.d("MainActivity", "Resume data found: $progressPercent% complete (${downloadedMB}MB/${totalMB}MB)")
+            peerCountTextView.text = "Torrent: Resuming download from $progressPercent% (${downloadedMB}MB/${totalMB}MB already downloaded)"
+        } else {
+            android.util.Log.d("MainActivity", "Starting fresh background P2P download for seeding")
+            peerCountTextView.text = "Torrent: Starting background download..."
+        }
+        
         isBackgroundDownloading = true
         
         val downloadFile = File(filesDir, "pictures.tar.gz")
@@ -1022,9 +1057,24 @@ class MainActivity : Activity(), TorrentDownloadListener {
             peerCountTextView.text = "Torrent: Valid file found, starting seeding..."
             return
         } else if (downloadFile.exists()) {
-            android.util.Log.w("MainActivity", "Archive file exists but hash verification failed - deleting corrupted file")
-            downloadFile.delete()
-            peerCountTextView.text = "Torrent: Removing corrupted file..."
+            // Check for SharedPreferences resume data before deleting
+            val resumePrefs = getSharedPreferences("torrent_resume", MODE_PRIVATE)
+            val hasResumeData = resumePrefs.getBoolean("has_resume_data", false)
+            
+            if (hasResumeData) {
+                val downloadedSize = resumePrefs.getLong("downloaded_size", 0)
+                val totalSize = resumePrefs.getLong("total_size", 0)
+                val progressPercent = if (totalSize > 0) (downloadedSize.toFloat() / totalSize * 100).toInt() else 0
+                
+                android.util.Log.w("MainActivity", "Partial download detected in startBackgroundTorrentDownload: ${progressPercent}% complete - preserving file for resume")
+                peerCountTextView.text = "Torrent: Partial download found (${progressPercent}%) - will resume..."
+                
+                // Don't delete the partial file - preserve it for resuming
+            } else {
+                android.util.Log.w("MainActivity", "Archive file exists but hash verification failed - deleting corrupted file")
+                downloadFile.delete()
+                peerCountTextView.text = "Torrent: Removing corrupted file..."
+            }
         }
         
         // Check if LibTorrent is available before attempting P2P
@@ -1047,6 +1097,20 @@ class MainActivity : Activity(), TorrentDownloadListener {
     // TorrentDownloadListener implementation for background download
     override fun onProgress(downloaded: Long, total: Long, downloadRate: Int, peers: Int) {
         connectedPeers = peers // Connected peers are those actively transferring data
+        
+        // Save progress to SharedPreferences for resume capability
+        if (total > 0) {
+            val resumePrefs = getSharedPreferences("torrent_resume", MODE_PRIVATE)
+            resumePrefs.edit().apply {
+                putBoolean("has_resume_data", true)
+                putLong("downloaded_size", downloaded)
+                putLong("total_size", total)
+                putString("download_path", File(filesDir, "pictures.tar.gz").absolutePath)
+                putLong("last_updated", System.currentTimeMillis())
+                apply()
+            }
+        }
+        
         val progress = if (total > 0) (downloaded.toFloat() / total * 100).toInt() else 0
         val downloadSpeedKB = downloadRate / 1024
         val downloadedMB = downloaded / (1024 * 1024)
@@ -1079,6 +1143,10 @@ class MainActivity : Activity(), TorrentDownloadListener {
         val downloadedFile = File(filePath)
         if (verifyFileHash(downloadedFile)) {
             android.util.Log.d("MainActivity", "P2P downloaded file hash verified successfully")
+            
+            // Clear resume data on successful completion (same as DownloadActivity)
+            clearResumeData()
+            
             peerCountTextView.text = "Background Download: Complete (P2P) - Hash verified, starting seeding..."
             // Start seeding the verified downloaded file
             torrentManager?.seedFile(filePath, this)
@@ -1086,6 +1154,10 @@ class MainActivity : Activity(), TorrentDownloadListener {
             android.util.Log.e("MainActivity", "P2P downloaded file hash verification failed - deleting corrupted file")
             peerCountTextView.text = "Background Download: Hash verification failed - file corrupted"
             downloadedFile.delete()
+            
+            // Clear resume data on corrupted file (no point keeping bad data)
+            clearResumeData()
+            
             // Don't retry - file was corrupted
             android.util.Log.w("MainActivity", "P2P downloaded file was corrupted - not retrying")
         }
@@ -1102,6 +1174,9 @@ class MainActivity : Activity(), TorrentDownloadListener {
             downloadRetryCount++
             peerCountTextView.text = "Torrent: Download error, retrying... (${downloadRetryCount}/$MAX_DOWNLOAD_RETRIES)"
             
+            // Keep resume data on error for retry (same as DownloadActivity pattern)
+            android.util.Log.d("MainActivity", "P2P error - keeping resume data for potential retry")
+            
             // Retry after 10 seconds
             Handler(Looper.getMainLooper()).postDelayed({
                 android.util.Log.d("MainActivity", "Retrying P2P download after error (attempt $downloadRetryCount)")
@@ -1109,6 +1184,10 @@ class MainActivity : Activity(), TorrentDownloadListener {
             }, 10000)
         } else {
             android.util.Log.w("MainActivity", "P2P download failed after $MAX_DOWNLOAD_RETRIES attempts")
+            
+            // Clear resume data after max retries to prevent stuck state
+            clearResumeData()
+            
             peerCountTextView.text = "Torrent: Download failed - $error"
             downloadRetryCount = 0 // Reset for future attempts
         }
@@ -1125,6 +1204,9 @@ class MainActivity : Activity(), TorrentDownloadListener {
             downloadRetryCount++
             peerCountTextView.text = "Torrent: No peers found, retrying... (${downloadRetryCount}/$MAX_DOWNLOAD_RETRIES)"
             
+            // Keep resume data on timeout - user might want to retry P2P later (same as DownloadActivity)
+            android.util.Log.d("MainActivity", "P2P timeout - keeping resume data for potential retry")
+            
             // Retry after 10 seconds
             Handler(Looper.getMainLooper()).postDelayed({
                 android.util.Log.d("MainActivity", "Retrying P2P download (attempt $downloadRetryCount)")
@@ -1132,6 +1214,10 @@ class MainActivity : Activity(), TorrentDownloadListener {
             }, 10000)
         } else {
             android.util.Log.w("MainActivity", "P2P download failed after $MAX_DOWNLOAD_RETRIES attempts")
+            
+            // Keep resume data even after max retries - don't clear like DownloadActivity
+            android.util.Log.d("MainActivity", "Max retries reached - keeping resume data for future manual retry")
+            
             peerCountTextView.text = "Torrent: Download failed - no peers available"
             downloadRetryCount = 0 // Reset for future attempts
         }
@@ -1307,6 +1393,21 @@ class MainActivity : Activity(), TorrentDownloadListener {
         android.util.Log.d("MainActivity", "File hash verification: expected=$EXPECTED_FILE_HASH, actual=$actualHash, valid=$isValid")
         
         return isValid
+    }
+    
+    /**
+     * Clear resume data (same as DownloadActivity implementation)
+     */
+    private fun clearResumeData() {
+        try {
+            // Clear resume preferences
+            val resumePrefs = getSharedPreferences("torrent_resume", MODE_PRIVATE)
+            resumePrefs.edit().clear().apply()
+            
+            android.util.Log.d("MainActivity", "Resume data cleared from MainActivity")
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Error clearing resume data", e)
+        }
     }
     
     /**
