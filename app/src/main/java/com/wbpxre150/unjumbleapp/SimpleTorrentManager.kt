@@ -80,7 +80,7 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
         
         try {
             // Load native library (same as FrostWire approach)
-            System.loadLibrary("jlibtorrent")
+            System.loadLibrary("jlibtorrent-1.2.19.0")
             Log.d(TAG, "✓ Native library loaded")
             
             // Try to load previous session state (FrostWire pattern)
@@ -794,7 +794,7 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
     }
     
     /**
-     * Simple seeding method (FrostWire pattern)
+     * Seed existing file using magnet link metadata (FrostWire pattern)
      */
     fun seedFile(filePath: String, listener: TorrentDownloadListener) {
         Log.d(TAG, "Starting seeding for: $filePath")
@@ -806,12 +806,81 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
                 return
             }
             
-            // For simplicity, just notify ready to seed
-            handler.post {
-                listener.onReadyToSeed()
-            }
+            // Get magnet link from resources
+            val magnetLink = context.getString(R.string.pictures_magnet_link)
+            Log.d(TAG, "Using magnet link for seeding: ${magnetLink.take(50)}...")
             
-            Log.d(TAG, "✅ File ready for seeding")
+            // Set up seeding mode
+            isDownloading = false
+            downloadListener = listener
+            currentDownloadPath = filePath
+            
+            // Fetch metadata from magnet link to get torrent info (background thread)
+            Log.d(TAG, "Fetching metadata for seeding...")
+            listener.onMetadataFetching()
+            
+            Thread {
+                try {
+                    // Use the enhanced fetchMagnet method that already exists
+                    val metadata = fetchMagnet(magnetLink, 120, false)
+                    
+                    if (metadata != null) {
+                        Log.d(TAG, "✅ Metadata fetched for seeding, configuring torrent...")
+                        
+                        try {
+                            // Create TorrentInfo from metadata (same pattern as downloadFile)
+                            val torrentInfo = TorrentInfo.bdecode(metadata)
+                            val downloadDir = file.parentFile
+                            
+                            Log.d(TAG, "Starting seeding for: ${torrentInfo.name()}")
+                            
+                            // Use the existing download method but for seeding
+                            download(torrentInfo, downloadDir)
+                            
+                            // Give session time to process
+                            Thread.sleep(1000)
+                            
+                            // Find and track the torrent handle (same as download)
+                            currentTorrentHandle = find(torrentInfo.infoHash())
+                            
+                            if (currentTorrentHandle?.isValid == true) {
+                                Log.d(TAG, "✅ Torrent added for seeding: ${torrentInfo.name()}")
+                                
+                                // Resume torrent to start seeding
+                                currentTorrentHandle?.resume()
+                                
+                                handler.post {
+                                    listener.onMetadataComplete()
+                                    listener.onReadyToSeed()
+                                }
+                                
+                                Log.d(TAG, "✅ Seeding started successfully")
+                            } else {
+                                Log.e(TAG, "❌ Failed to create torrent handle for seeding")
+                                handler.post {
+                                    listener.onError("Failed to create torrent handle for seeding")
+                                }
+                            }
+                            
+                        } catch (e: Exception) {
+                            Log.e(TAG, "❌ Error configuring torrent for seeding: ${e.message}")
+                            handler.post {
+                                listener.onError("Seeding configuration failed: ${e.message}")
+                            }
+                        }
+                    } else {
+                        Log.e(TAG, "❌ Failed to fetch metadata for seeding")
+                        handler.post {
+                            listener.onError("Failed to fetch seeding metadata")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ Seeding thread error: ${e.message}")
+                    handler.post {
+                        listener.onError("Seeding thread failed: ${e.message}")
+                    }
+                }
+            }.start()
             
         } catch (e: Exception) {
             Log.e(TAG, "❌ Seeding error: ${e.message}")
