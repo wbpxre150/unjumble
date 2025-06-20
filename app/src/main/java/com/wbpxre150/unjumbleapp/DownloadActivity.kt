@@ -37,7 +37,8 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
     private var leecherCount = 0
     private var maxPeersObserved = 0
     private var peerSearchStartTime = 0L
-    private val networkManager = NetworkManager.getInstance(this)
+    private val networkManager by lazy { NetworkManager.getInstance(this) }
+    private var networkChangeListener: ((Boolean) -> Unit)? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -58,6 +59,9 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         timeRemainingTextView = findViewById(R.id.timeRemainingTextView)
         torrentManager = SimpleTorrentManager.getInstance(this)
 
+        // Start network monitoring for FrostWire integration
+        startNetworkMonitoring()
+        
         GlobalScope.launch(Dispatchers.Main) {
             try {
                 startDownload()
@@ -358,19 +362,32 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
         }
     }
 
-    // Enhanced status callbacks for better torrent lifecycle tracking
+    // Enhanced status callbacks for better torrent lifecycle tracking (FrostWire pattern)
     override fun onDhtConnecting() {
-        android.util.Log.d("DownloadActivity", "DHT connecting...")
-        statusTextView.text = "Connecting to DHT network..."
-        timeRemainingTextView.text = "Initializing P2P connection"
+        android.util.Log.d("DownloadActivity", "DHT connecting (FrostWire enhanced)...")
+        statusTextView.text = "Connecting to enhanced DHT network..."
+        timeRemainingTextView.text = "Initializing optimized P2P connection"
     }
 
     override fun onDhtConnected(nodeCount: Int) {
         isDhtConnected = true
         dhtNodeCount = nodeCount
-        android.util.Log.d("DownloadActivity", "DHT connected with $nodeCount nodes")
-        statusTextView.text = "DHT network connected ($nodeCount nodes)"
-        timeRemainingTextView.text = if (nodeCount > 0) "Connected to $nodeCount DHT nodes - starting peer search" else "DHT connection established - limited peer discovery"
+        android.util.Log.d("DownloadActivity", "Enhanced DHT connected with $nodeCount nodes (FrostWire optimization active)")
+        
+        val qualityIndicator = when {
+            nodeCount >= 50 -> "Excellent"
+            nodeCount >= 20 -> "Good"
+            nodeCount >= 10 -> "Fair"
+            nodeCount > 0 -> "Limited"
+            else -> "Poor"
+        }
+        
+        statusTextView.text = "Enhanced DHT connected: $nodeCount nodes ($qualityIndicator)"
+        timeRemainingTextView.text = if (nodeCount >= 10) {
+            "Strong DHT connectivity - enhanced peer discovery active"
+        } else {
+            "Limited DHT connectivity - basic peer discovery only"
+        }
     }
 
     override fun onDiscoveringPeers() {
@@ -454,8 +471,118 @@ class DownloadActivity : Activity(), TorrentDownloadListener {
     }
 
     override fun onSessionDiagnostic(message: String) {
-        android.util.Log.d("DownloadActivity", "Session Diagnostic: $message")
-        timeRemainingTextView.text = "Session: $message"
+        android.util.Log.d("DownloadActivity", "Enhanced Session Diagnostic: $message")
+        timeRemainingTextView.text = "Enhanced Session: $message"
+    }
+    
+    // FrostWire-style enhanced callbacks implementation
+    override fun onPeerStatusChanged(totalPeers: Int, seeds: Int, connectingPeers: Int) {
+        val leechers = totalPeers - seeds
+        android.util.Log.d("DownloadActivity", "Enhanced peer status: $totalPeers total ($seeds seeds, $leechers leechers, $connectingPeers connecting)")
+        
+        this.seedCount = seeds
+        this.leecherCount = leechers
+        this.totalPeersFound = totalPeers
+        this.currentPeerCount = totalPeers
+        
+        if (totalPeers > maxPeersObserved) {
+            maxPeersObserved = totalPeers
+        }
+        
+        // Enhanced peer status display
+        val peerQuality = when {
+            seeds >= 5 && totalPeers >= 10 -> "Excellent"
+            seeds >= 2 && totalPeers >= 5 -> "Good"
+            seeds >= 1 && totalPeers >= 2 -> "Fair"
+            totalPeers > 0 -> "Limited"
+            else -> "None"
+        }
+        
+        statusTextView.text = "Peer Status ($peerQuality): $totalPeers peers ($seeds seeds, $leechers leechers)"
+        timeRemainingTextView.text = if (connectingPeers > 0) {
+            "Active connections: $totalPeers | Connecting: $connectingPeers"
+        } else {
+            "Connected peers: $totalPeers | Seeds: $seeds | Download sources available"
+        }
+    }
+    
+    override fun onDownloadStagnant(stagnantTimeSeconds: Int, activePeers: Int) {
+        android.util.Log.w("DownloadActivity", "Enhanced download stagnant for ${stagnantTimeSeconds}s with $activePeers active peers")
+        
+        val stagnantReason = when {
+            activePeers == 0 -> "No active peers available"
+            activePeers < 3 -> "Limited peer availability"
+            else -> "Network or peer issues possible"
+        }
+        
+        statusTextView.text = "⚠️ Download stagnant (${stagnantTimeSeconds}s): $stagnantReason"
+        timeRemainingTextView.text = "Active peers: $activePeers | Attempting to find additional sources..."
+    }
+    
+    override fun onSessionQualityChanged(dhtNodes: Int, downloadRate: Int, uploadRate: Int) {
+        android.util.Log.d("DownloadActivity", "Enhanced session quality: DHT($dhtNodes) ↓${downloadRate/1024}KB/s ↑${uploadRate/1024}KB/s")
+        
+        // Update our tracking variables
+        this.dhtNodeCount = dhtNodes
+        
+        val sessionQuality = when {
+            dhtNodes >= 50 && downloadRate > 50000 -> "Excellent"
+            dhtNodes >= 20 && downloadRate > 10000 -> "Good"
+            dhtNodes >= 10 && downloadRate > 1000 -> "Fair"
+            dhtNodes > 0 -> "Limited"
+            else -> "Poor"
+        }
+        
+        // Only update UI if this represents a significant change
+        if (downloadRate > 0) {
+            val downloadSpeedKB = downloadRate / 1024
+            val uploadSpeedKB = uploadRate / 1024
+            timeRemainingTextView.text = "Session Quality: $sessionQuality | DHT: $dhtNodes nodes | ↓${downloadSpeedKB}KB/s ↑${uploadSpeedKB}KB/s"
+        }
+    }
+    
+    /**
+     * Start network monitoring for FrostWire integration
+     */
+    private fun startNetworkMonitoring() {
+        networkChangeListener = { isWiFi ->
+            android.util.Log.d("DownloadActivity", "Network change detected: WiFi=$isWiFi")
+            
+            // Notify TorrentManager of network change (FrostWire pattern)
+            torrentManager.handleNetworkChange(isWiFi)
+            
+            // Update UI based on network type
+            val networkType = if (isWiFi) "WiFi/Ethernet" else "Mobile Data"
+            
+            runOnUiThread {
+                if (!isP2PAttemptFinished) {
+                    timeRemainingTextView.text = "Network changed to $networkType - optimizing settings..."
+                }
+            }
+        }
+        
+        networkManager.startNetworkMonitoring(networkChangeListener!!)
+        android.util.Log.d("DownloadActivity", "Network monitoring started (FrostWire integration)")
+    }
+    
+    /**
+     * Stop network monitoring
+     */
+    private fun stopNetworkMonitoring() {
+        networkManager.stopNetworkMonitoring()
+        networkChangeListener = null
+        android.util.Log.d("DownloadActivity", "Network monitoring stopped")
+    }
+    
+    override fun onDestroy() {
+        super.onDestroy()
+        
+        // Ensure cleanup of network monitoring and torrent manager
+        stopNetworkMonitoring()
+        
+        if (this::torrentManager.isInitialized) {
+            torrentManager.shutdown()
+        }
     }
 
 

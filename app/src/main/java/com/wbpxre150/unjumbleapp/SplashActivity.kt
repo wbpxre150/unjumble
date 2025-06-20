@@ -20,8 +20,8 @@ class SplashActivity : Activity() {
         // Initialize LibTorrent4j on background thread
         GlobalScope.launch(Dispatchers.IO) {
             try {
-                // This will initialize TorrentManager and load LibTorrent4j
-                val torrentManager = TorrentManager.getInstance(this@SplashActivity)
+                // This will initialize SimpleTorrentManager and load jlibtorrent
+                val torrentManager = SimpleTorrentManager.getInstance(this@SplashActivity)
                 
                 withContext(Dispatchers.Main) {
                     if (torrentManager.isLibraryLoaded()) {

@@ -54,7 +54,7 @@ class MainActivity : Activity(), TorrentDownloadListener {
     private var timerRunnable: Runnable? = null
     private var isTimerRunning = false
     
-    private var torrentManager: TorrentManager? = null
+    private var torrentManager: SimpleTorrentManager? = null
     private var peerUpdateHandler: Handler = Handler(Looper.getMainLooper())
     private var peerUpdateRunnable: Runnable? = null
     private var isBackgroundDownloading = false
@@ -63,7 +63,7 @@ class MainActivity : Activity(), TorrentDownloadListener {
     private var downloadRetryCount = 0
     private var totalPeersFound = 0
     private var connectedPeers = 0
-    private val networkManager = NetworkManager.getInstance(this)
+    private val networkManager by lazy { NetworkManager.getInstance(this) }
     
     companion object {
         // Expected SHA-256 hash of the correct pictures.tar.gz file
@@ -116,10 +116,10 @@ class MainActivity : Activity(), TorrentDownloadListener {
         level = sharedPreferences.getInt("level", 1)
         totalPlayTimeMillis = sharedPreferences.getLong("totalPlayTimeMillis", 0)
         
-        // Initialize TorrentManager for seeding (after UI is set up)
-        android.util.Log.d("MainActivity", "Initializing TorrentManager...")
-        torrentManager = TorrentManager.getInstance(this)
-        android.util.Log.d("MainActivity", "TorrentManager initialized, library loaded: ${torrentManager?.isLibraryLoaded()}")
+        // Initialize SimpleTorrentManager for seeding (after UI is set up)
+        android.util.Log.d("MainActivity", "Initializing SimpleTorrentManager...")
+        torrentManager = SimpleTorrentManager.getInstance(this)
+        android.util.Log.d("MainActivity", "SimpleTorrentManager initialized, library loaded: ${torrentManager?.isLibraryLoaded()}")
         
         // Migrate existing cache file to internal storage if it exists
         migrateCacheFileToInternalStorage()
@@ -131,7 +131,7 @@ class MainActivity : Activity(), TorrentDownloadListener {
         if (verifyFileHash(downloadedFile)) {
             android.util.Log.d("MainActivity", "Found valid torrent file (${downloadedFile.length()} bytes), hash verified, starting seeding")
             peerCountTextView.text = "Torrent: Valid archive file found, starting seeding..."
-            // Use the enhanced seedFile method that can restore from stored magnet link
+            // Use SimpleTorrentManager's streamlined seedFile method
             try {
                 isSeedingInitializing = true
                 seedingInitStartTime = System.currentTimeMillis()
