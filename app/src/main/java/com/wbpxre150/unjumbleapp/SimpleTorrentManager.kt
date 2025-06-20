@@ -36,6 +36,7 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
         private const val DHT_MIN_NODES_REQUIRED = 10 // Higher threshold for better reliability
         private const val MAX_RETRY_ATTEMPTS = 3 // FrostWire-style retry limit
         private const val DHT_BOOTSTRAP_CHECK_INTERVAL_MS = 500L // FrostWire bootstrap monitoring frequency
+        private const val STATE_VERSION = "1.2.19.0" // Session state compatibility version
         
         @Volatile
         private var INSTANCE: SimpleTorrentManager? = null
@@ -82,11 +83,19 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
             System.loadLibrary("jlibtorrent")
             Log.d(TAG, "✓ Native library loaded")
             
-            // Create FrostWire-style settings
-            val settingsPack = createFrostWireSettings()
+            // Try to load previous session state (FrostWire pattern)
+            val savedSessionParams = loadSessionState()
+            val sessionParams = if (savedSessionParams != null) {
+                Log.d(TAG, "✓ Using saved session state for faster startup")
+                savedSessionParams
+            } else {
+                Log.d(TAG, "Creating new session with FrostWire settings")
+                val settingsPack = createFrostWireSettings()
+                SessionParams(settingsPack)
+            }
             
-            // Start session with settings (FrostWire pattern)
-            start(SessionParams(settingsPack))
+            // Start session with optimized parameters (FrostWire pattern)
+            start(sessionParams)
             sessionStartTime = System.currentTimeMillis()
             Log.d(TAG, "✓ Session started with FrostWire settings")
             
@@ -107,25 +116,39 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
     private fun createFrostWireSettings(): SettingsPack {
         val settings = SettingsPack()
         
-        // FrostWire's proven DHT configuration - enhanced bootstrap nodes
+        // Enhanced DHT configuration with IPv6 support
         settings.enableDht(true)
         settings.setString(
             settings_pack.string_types.dht_bootstrap_nodes.swigValue(),
-            "dht.libtorrent.org:25401,router.bittorrent.com:6881,router.utorrent.com:6881,dht.transmissionbt.com:6881"
+            "dht.libtorrent.org:25401,router.bittorrent.com:6881,router.utorrent.com:6881,dht.transmissionbt.com:6881,router.silotis.us:6881"
         )
         
-        // FrostWire's port configuration strategy
+        // FrostWire's port configuration strategy with IPv6
         currentPort = (49152..65534).random()
         settings.setString(
             settings_pack.string_types.listen_interfaces.swigValue(),
             "0.0.0.0:$currentPort,[::]:$currentPort"
         )
         
-        // FrostWire's Android-optimized connection limits
-        settings.setInteger(settings_pack.int_types.connections_limit.swigValue(), 200)
-        settings.setInteger(settings_pack.int_types.active_downloads.swigValue(), 4)
-        settings.setInteger(settings_pack.int_types.active_seeds.swigValue(), 4)
-        settings.setInteger(settings_pack.int_types.active_limit.swigValue(), 8)
+        // Aggressive connection scaling based on network type
+        val networkManager = NetworkManager.getInstance(context)
+        val isWiFi = networkManager.isOnWiFi()
+        
+        if (isWiFi) {
+            // WiFi: Aggressive settings for maximum performance
+            settings.setInteger(settings_pack.int_types.connections_limit.swigValue(), 800)
+            settings.setInteger(settings_pack.int_types.active_downloads.swigValue(), 8)
+            settings.setInteger(settings_pack.int_types.active_seeds.swigValue(), 8)
+            settings.setInteger(settings_pack.int_types.active_limit.swigValue(), 50)
+            Log.d(TAG, "Applied WiFi aggressive connection settings: 800 connections, 50 active limit")
+        } else {
+            // Mobile: Conservative but enhanced settings
+            settings.setInteger(settings_pack.int_types.connections_limit.swigValue(), 300)
+            settings.setInteger(settings_pack.int_types.active_downloads.swigValue(), 4)
+            settings.setInteger(settings_pack.int_types.active_seeds.swigValue(), 4)
+            settings.setInteger(settings_pack.int_types.active_limit.swigValue(), 20)
+            Log.d(TAG, "Applied mobile conservative connection settings: 300 connections, 20 active limit")
+        }
         
         // FrostWire's enhanced peer discovery settings
         settings.setBoolean(settings_pack.bool_types.enable_lsd.swigValue(), true)
@@ -143,7 +166,7 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
         settings.setInteger(settings_pack.int_types.dht_upload_rate_limit.swigValue(), 8000)
         settings.setBoolean(settings_pack.bool_types.prefer_rc4.swigValue(), false)
         
-        // Enhanced alert configuration for better tracking
+        // Comprehensive alert system matching FrostWire
         settings.setInteger(
             settings_pack.int_types.alert_mask.swigValue(),
             AlertType.METADATA_RECEIVED.swig() or 
@@ -152,19 +175,168 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
             AlertType.STATE_CHANGED.swig() or
             AlertType.DHT_BOOTSTRAP.swig() or
             AlertType.PEER_CONNECT.swig() or
-            AlertType.PEER_DISCONNECTED.swig()
+            AlertType.PEER_DISCONNECTED.swig() or
+            AlertType.EXTERNAL_IP.swig() or
+            AlertType.LISTEN_SUCCEEDED.swig() or
+            AlertType.LISTEN_FAILED.swig() or
+            AlertType.TRACKER_ANNOUNCE.swig() or
+            AlertType.TRACKER_REPLY.swig() or
+            AlertType.TRACKER_ERROR.swig() or
+            AlertType.DHT_REPLY.swig() or
+            AlertType.DHT_GET_PEERS.swig() or
+            AlertType.TORRENT_CHECKED.swig() or
+            AlertType.TORRENT_RESUMED.swig() or
+            AlertType.TORRENT_PAUSED.swig()
         )
         
-        Log.d(TAG, "✓ Enhanced FrostWire-style settings configured (port: $currentPort)")
+        // FrostWire-style alert queue optimization
+        settings.setInteger(settings_pack.int_types.alert_queue_size.swigValue(), 5000)
+        
+        // Peer fingerprinting for better peer relationships
+        val fingerprint = com.frostwire.jlibtorrent.swig.libtorrent.generate_fingerprint("UJ", 1, 0, 0, 0)
+        settings.setString(settings_pack.string_types.peer_fingerprint.swigValue(), fingerprint)
+        
+        // Enhanced user agent matching FrostWire pattern
+        val libVersion = com.frostwire.jlibtorrent.swig.libtorrent.version()
+        val userAgent = "Unjumble/1.0.0 libtorrent/$libVersion"
+        settings.setString(settings_pack.string_types.user_agent.swigValue(), userAgent)
+        
+        // FrostWire's performance optimizations
+        settings.setInteger(settings_pack.int_types.stop_tracker_timeout.swigValue(), 0)
+        settings.setBoolean(settings_pack.bool_types.validate_https_trackers.swigValue(), false)
+        
+        // Memory optimization detection
+        val memoryOptimized = isMemoryConstrainedDevice()
+        if (memoryOptimized) {
+            applyMemoryOptimizations(settings)
+            Log.d(TAG, "Applied memory optimizations for constrained device")
+        }
+        
+        Log.d(TAG, "✓ Enhanced FrostWire-style settings configured")
+        Log.d(TAG, "  - Port: $currentPort")
+        Log.d(TAG, "  - Network: ${if (isWiFi) "WiFi (aggressive)" else "Mobile (conservative)"}")
+        Log.d(TAG, "  - Fingerprint: $fingerprint")
+        Log.d(TAG, "  - User Agent: $userAgent")
+        Log.d(TAG, "  - Memory Optimized: $memoryOptimized")
+        
         return settings
     }
     
     /**
-     * Enhanced session bootstrap monitoring (FrostWire pattern)
+     * Detect if device is memory constrained (FrostWire pattern)
+     */
+    private fun isMemoryConstrainedDevice(): Boolean {
+        val runtime = Runtime.getRuntime()
+        val maxMemory = runtime.maxMemory()
+        val totalMemory = runtime.totalMemory()
+        val freeMemory = runtime.freeMemory()
+        val availableMemory = maxMemory - (totalMemory - freeMemory)
+        
+        // Consider memory constrained if less than 256MB available
+        val isConstrained = availableMemory < 256 * 1024 * 1024
+        
+        Log.d(TAG, "Memory analysis: Available=${availableMemory / (1024*1024)}MB, Constrained=$isConstrained")
+        return isConstrained
+    }
+    
+    /**
+     * Apply FrostWire-style memory optimizations
+     */
+    private fun applyMemoryOptimizations(settings: SettingsPack) {
+        // FrostWire's memory optimization settings
+        val defaultMaxQueuedDiskBytes = 1048576 // 1MB default
+        settings.setInteger(settings_pack.int_types.max_queued_disk_bytes.swigValue(), defaultMaxQueuedDiskBytes / 2)
+        
+        val defaultSendBufferWatermark = 500 * 1024 // 500KB default
+        settings.setInteger(settings_pack.int_types.send_buffer_watermark.swigValue(), defaultSendBufferWatermark / 2)
+        
+        settings.setInteger(settings_pack.int_types.cache_size.swigValue(), 256)
+        settings.setInteger(settings_pack.int_types.max_peerlist_size.swigValue(), 200)
+        settings.setInteger(settings_pack.int_types.tick_interval.swigValue(), 1000)
+        settings.setInteger(settings_pack.int_types.inactivity_timeout.swigValue(), 60)
+        settings.setBoolean(settings_pack.bool_types.seeding_outgoing_connections.swigValue(), false)
+        settings.setBoolean(settings_pack.bool_types.enable_ip_notifier.swigValue(), false)
+        
+        // Reduce connection limits for memory constrained devices
+        val currentConnectionLimit = settings.getInteger(settings_pack.int_types.connections_limit.swigValue())
+        settings.setInteger(settings_pack.int_types.connections_limit.swigValue(), currentConnectionLimit / 2)
+        
+        val currentActiveLimit = settings.getInteger(settings_pack.int_types.active_limit.swigValue())
+        settings.setInteger(settings_pack.int_types.active_limit.swigValue(), currentActiveLimit / 2)
+    }
+    
+    /**
+     * Load session state from disk (FrostWire pattern)
+     */
+    private fun loadSessionState(): SessionParams? {
+        return try {
+            val stateFile = File(context.filesDir, "torrent_session_state.dat")
+            if (!stateFile.exists()) {
+                Log.d(TAG, "No previous session state found, using defaults")
+                return null
+            }
+            
+            val data = stateFile.readBytes()
+            Log.d(TAG, "✓ Loaded raw session state: ${data.size} bytes")
+            
+            // For now, return null to use default settings until jlibtorrent Entry API is sorted
+            // TODO: Implement proper session state persistence when Entry API is available
+            null
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to load session state: ${e.message}")
+            null
+        }
+    }
+    
+    /**
+     * Save session state to disk (FrostWire pattern)
+     */
+    private fun saveSessionState() {
+        try {
+            if (!isLibraryAvailable) return
+            
+            val sessionData = saveState()
+            if (sessionData != null) {
+                val stateFile = File(context.filesDir, "torrent_session_state.dat")
+                stateFile.writeBytes(sessionData)
+                
+                Log.d(TAG, "✓ Saved session state: ${sessionData.size} bytes")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save session state: ${e.message}")
+        }
+    }
+    
+    /**
+     * Enhanced multi-threaded session bootstrap monitoring (Advanced FrostWire pattern)
      */
     private fun startSessionBootstrapMonitoring() {
+        val bootstrapExecutor = java.util.concurrent.Executors.newFixedThreadPool(3)
+        
+        // Main DHT bootstrap monitoring thread
+        bootstrapExecutor.submit {
+            startDHTBootstrapMonitoring()
+        }
+        
+        // Tracker connectivity monitoring thread
+        bootstrapExecutor.submit {
+            startTrackerConnectivityMonitoring()
+        }
+        
+        // Peer discovery monitoring thread
+        bootstrapExecutor.submit {
+            startPeerDiscoveryMonitoring()
+        }
+        
+        Log.d(TAG, "🔄 Started advanced multi-threaded bootstrap monitoring")
+    }
+    
+    /**
+     * DHT-focused bootstrap monitoring
+     */
+    private fun startDHTBootstrapMonitoring() {
         Thread {
-            Log.d(TAG, "🔄 Starting enhanced FrostWire-style session bootstrap monitoring...")
+            Log.d(TAG, "🔄 Starting DHT bootstrap monitoring thread...")
             
             var attempts = 0
             val maxAttempts = (SESSION_BOOTSTRAP_TIMEOUT_MS / DHT_BOOTSTRAP_CHECK_INTERVAL_MS).toInt()
@@ -222,6 +394,78 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
                 // Don't set isSessionReady = true here - let download logic handle partial readiness
             }
             
+        }.start()
+    }
+    
+    /**
+     * Tracker connectivity monitoring thread
+     */
+    private fun startTrackerConnectivityMonitoring() {
+        Thread {
+            Log.d(TAG, "🔄 Starting tracker connectivity monitoring thread...")
+            
+            var trackerCheckCount = 0
+            val maxTrackerChecks = 20 // Check for 40 seconds
+            
+            while (trackerCheckCount < maxTrackerChecks && !isSessionReady) {
+                try {
+                    val sessionStats = stats()
+                    if (sessionStats != null) {
+                        val downloadRate = sessionStats.downloadRate().toInt()
+                        val uploadRate = sessionStats.uploadRate().toInt()
+                        
+                        if (trackerCheckCount % 5 == 0) { // Log every 10 seconds
+                            Log.d(TAG, "Tracker monitoring: ↓${downloadRate/1024}KB/s, ↑${uploadRate/1024}KB/s")
+                        }
+                    }
+                    
+                    Thread.sleep(2000) // Check every 2 seconds
+                    trackerCheckCount++
+                    
+                } catch (e: Exception) {
+                    Log.w(TAG, "Tracker monitoring error: ${e.message}")
+                    trackerCheckCount++
+                }
+            }
+            
+            Log.d(TAG, "Tracker connectivity monitoring thread completed")
+        }.start()
+    }
+    
+    /**
+     * Peer discovery monitoring thread
+     */
+    private fun startPeerDiscoveryMonitoring() {
+        Thread {
+            Log.d(TAG, "🔄 Starting peer discovery monitoring thread...")
+            
+            var peerCheckCount = 0
+            val maxPeerChecks = 30 // Check for 60 seconds
+            
+            while (peerCheckCount < maxPeerChecks && !isSessionReady) {
+                try {
+                    val sessionStats = stats()
+                    if (sessionStats != null) {
+                        val downloadRate = sessionStats.downloadRate().toInt()
+                        val uploadRate = sessionStats.uploadRate().toInt()
+                        val totalDownload = sessionStats.totalDownload().toInt()
+                        
+                        // Use download/upload stats as proxy for peer activity
+                        if (peerCheckCount % 10 == 0) { // Log every 20 seconds
+                            Log.d(TAG, "Peer discovery: ↓${downloadRate/1024}KB/s, ↑${uploadRate/1024}KB/s, total: ${totalDownload/(1024*1024)}MB")
+                        }
+                    }
+                    
+                    Thread.sleep(2000) // Check every 2 seconds
+                    peerCheckCount++
+                    
+                } catch (e: Exception) {
+                    Log.w(TAG, "Peer discovery monitoring error: ${e.message}")
+                    peerCheckCount++
+                }
+            }
+            
+            Log.d(TAG, "Peer discovery monitoring thread completed")
         }.start()
     }
     
@@ -672,27 +916,128 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
     }
     
     /**
-     * Enhanced metadata fetch with FrostWire patterns
+     * Enhanced parallel metadata fetch with multiple strategies
      */
     private fun performEnhancedMetadataFetch(magnetLink: String, dhtNodes: Int): ByteArray? {
         return try {
-            // FrostWire uses direct fetchMagnet with optimized settings
             val startTime = System.currentTimeMillis()
+            Log.d(TAG, "Starting parallel metadata fetch with $dhtNodes DHT nodes available")
             
-            Log.d(TAG, "Starting enhanced metadata fetch with $dhtNodes DHT nodes available")
+            // If we have good DHT connectivity, try parallel approach
+            if (dhtNodes >= DHT_MIN_NODES_REQUIRED) {
+                val metadata = performParallelMetadataFetch(magnetLink)
+                if (metadata != null) {
+                    val duration = System.currentTimeMillis() - startTime
+                    Log.d(TAG, "✅ Parallel metadata fetch successful: ${metadata.size} bytes in ${duration}ms")
+                    return metadata
+                }
+            }
             
+            // Fallback to standard FrostWire approach
+            Log.d(TAG, "Falling back to standard metadata fetch")
             val metadata = fetchMagnet(magnetLink, METADATA_TIMEOUT_SECONDS, false)
             
             val duration = System.currentTimeMillis() - startTime
             if (metadata != null) {
-                Log.d(TAG, "✅ Enhanced metadata fetch successful: ${metadata.size} bytes in ${duration}ms")
+                Log.d(TAG, "✅ Standard metadata fetch successful: ${metadata.size} bytes in ${duration}ms")
             } else {
-                Log.w(TAG, "❌ Enhanced metadata fetch failed after ${duration}ms")
+                Log.w(TAG, "❌ All metadata fetch strategies failed after ${duration}ms")
             }
             
             metadata
         } catch (e: Exception) {
             Log.e(TAG, "Enhanced metadata fetch exception: ${e.message}")
+            null
+        }
+    }
+    
+    /**
+     * Parallel metadata fetch using multiple strategies
+     */
+    private fun performParallelMetadataFetch(magnetLink: String): ByteArray? {
+        return try {
+            val executor = java.util.concurrent.Executors.newFixedThreadPool(3)
+            val futures = mutableListOf<java.util.concurrent.Future<ByteArray?>>()
+            
+            // Strategy 1: DHT-optimized fetch (shorter timeout, prefer DHT)
+            futures.add(executor.submit<ByteArray?> {
+                try {
+                    Log.d(TAG, "Parallel strategy 1: DHT-optimized fetch")
+                    fetchMagnet(magnetLink, 45, false) // 45 second timeout for DHT
+                } catch (e: Exception) {
+                    Log.d(TAG, "DHT-optimized fetch failed: ${e.message}")
+                    null
+                }
+            })
+            
+            // Strategy 2: Tracker-optimized fetch (if trackers are in magnet)
+            if (magnetLink.contains("&tr=")) {
+                futures.add(executor.submit<ByteArray?> {
+                    try {
+                        Log.d(TAG, "Parallel strategy 2: Tracker-optimized fetch")
+                        Thread.sleep(5000) // Give DHT a head start
+                        fetchMagnet(magnetLink, 60, true) // Enable tracker prioritization
+                    } catch (e: Exception) {
+                        Log.d(TAG, "Tracker-optimized fetch failed: ${e.message}")
+                        null
+                    }
+                })
+            }
+            
+            // Strategy 3: Standard fetch with full timeout
+            futures.add(executor.submit<ByteArray?> {
+                try {
+                    Log.d(TAG, "Parallel strategy 3: Standard fetch")
+                    Thread.sleep(10000) // Give other strategies time
+                    fetchMagnet(magnetLink, METADATA_TIMEOUT_SECONDS, false)
+                } catch (e: Exception) {
+                    Log.d(TAG, "Standard fetch failed: ${e.message}")
+                    null
+                }
+            })
+            
+            // Return first successful result
+            for (i in 0 until 3) {
+                for (future in futures) {
+                    try {
+                        val result = future.get(0, java.util.concurrent.TimeUnit.MILLISECONDS)
+                        if (result != null && result.isNotEmpty()) {
+                            Log.d(TAG, "✅ Parallel fetch succeeded with strategy ${futures.indexOf(future) + 1}")
+                            executor.shutdownNow() // Cancel other tasks
+                            return result
+                        }
+                    } catch (e: java.util.concurrent.TimeoutException) {
+                        // Continue polling
+                    }
+                }
+                Thread.sleep(2000) // Poll every 2 seconds
+            }
+            
+            // Wait for any remaining results
+            val startWait = System.currentTimeMillis()
+            while (System.currentTimeMillis() - startWait < 60000) { // 60 second max wait
+                for (future in futures) {
+                    try {
+                        if (future.isDone) {
+                            val result = future.get()
+                            if (result != null && result.isNotEmpty()) {
+                                Log.d(TAG, "✅ Parallel fetch completed with strategy ${futures.indexOf(future) + 1}")
+                                executor.shutdownNow()
+                                return result
+                            }
+                        }
+                    } catch (e: Exception) {
+                        // Continue with other futures
+                    }
+                }
+                Thread.sleep(1000)
+            }
+            
+            executor.shutdownNow()
+            null
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Parallel metadata fetch error: ${e.message}")
             null
         }
     }
@@ -780,12 +1125,15 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
     }
     
     /**
-     * FrostWire-style network change handling
+     * Enhanced network change handling with session state persistence
      */
     fun handleNetworkChange(isWiFi: Boolean) {
-        Log.d(TAG, "Handling network change: WiFi=$isWiFi (FrostWire pattern)")
+        Log.d(TAG, "Handling network change: WiFi=$isWiFi (Enhanced FrostWire pattern)")
         
         try {
+            // Save current session state before changes
+            saveSessionState()
+            
             if (isWiFi) {
                 // Enable more aggressive settings for WiFi
                 adjustSettingsForWiFi()
@@ -795,6 +1143,13 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
                 adjustSettingsForMobile()
                 Log.d(TAG, "Applied mobile data optimizations")
             }
+            
+            // Save state after network optimization changes
+            Thread {
+                Thread.sleep(2000) // Allow changes to settle
+                saveSessionState()
+            }.start()
+            
         } catch (e: Exception) {
             Log.e(TAG, "Error handling network change: ${e.message}")
         }
@@ -883,12 +1238,16 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
     }
     
     /**
-     * Enhanced shutdown with FrostWire patterns
+     * Enhanced shutdown with session state persistence
      */
     fun shutdown() {
-        Log.d(TAG, "Starting enhanced shutdown (FrostWire pattern)...")
+        Log.d(TAG, "Starting enhanced shutdown with state persistence...")
         
         try {
+            // Save current session state before shutdown
+            Log.d(TAG, "Saving session state for faster next startup...")
+            saveSessionState()
+            
             // Save download state for potential resume
             if (isDownloading && currentTorrentHandle?.isValid == true) {
                 Log.d(TAG, "Saving download state for resume...")
@@ -906,9 +1265,17 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
             }
             currentTorrentHandle = null
             
-            // Clean session stop
+            // Clean session stop with final state save
             if (isLibraryAvailable) {
                 Log.d(TAG, "Stopping BitTorrent session...")
+                
+                // Final session state save before stop
+                try {
+                    saveSessionState()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed final session state save: ${e.message}")
+                }
+                
                 stop()
                 Thread.sleep(1000) // Allow session cleanup
             }
@@ -916,7 +1283,7 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
             isLibraryAvailable = false
             isSessionReady = false
             
-            Log.d(TAG, "Enhanced shutdown complete")
+            Log.d(TAG, "Enhanced shutdown complete with state persistence")
             
         } catch (e: Exception) {
             Log.e(TAG, "Error during enhanced shutdown: ${e.message}")

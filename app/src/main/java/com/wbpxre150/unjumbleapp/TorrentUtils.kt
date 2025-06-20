@@ -64,8 +64,8 @@ object TorrentUtils {
         Log.d(TAG, "  🌐 DHT nodes: ${sessionManager?.stats()?.dhtNodes() ?: 0}")
         
         return try {
-            val timeout = 60
-            Log.d(TAG, "🎯 Attempting fetchMagnet with ${timeout}s timeout...")
+            val timeout = 120 // Increased timeout to match SimpleTorrentManager
+            Log.d(TAG, "🎯 Attempting enhanced fetchMagnet with ${timeout}s timeout (FrostWire pattern)...")
             
             handler.post {
                 val dhtNodes = sessionManager?.stats()?.dhtNodes()?.toInt() ?: 0
