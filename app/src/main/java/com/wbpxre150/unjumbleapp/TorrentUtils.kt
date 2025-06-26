@@ -1,8 +1,10 @@
 package com.wbpxre150.unjumbleapp
 
+import android.content.Context
 import android.os.Handler
 import android.util.Log
 import com.frostwire.jlibtorrent.SessionManager
+import java.io.File
 
 object TorrentUtils {
     private const val TAG = "TorrentUtils"
@@ -57,7 +59,8 @@ object TorrentUtils {
         trackerUrls: List<String>, 
         listener: TorrentDownloadListener,
         sessionManager: SessionManager?,
-        handler: Handler
+        handler: Handler,
+        context: Context
     ): ByteArray? {
         Log.d(TAG, "🔄 Starting concurrent metadata resolution...")
         Log.d(TAG, "  📡 ${trackerUrls.size} trackers available")
@@ -94,7 +97,24 @@ object TorrentUtils {
             }
             progressThread.start()
             
-            val metadata = sessionManager?.fetchMagnet(magnetLink, timeout, false)
+            val tempDir = File(context.cacheDir, "magnet_temp")
+            if (!tempDir.exists()) {
+                tempDir.mkdirs()
+            }
+            val metadata = sessionManager?.fetchMagnet(magnetLink, timeout, tempDir)
+            
+            // Cleanup temp directory
+            try {
+                tempDir.listFiles()?.let { files ->
+                    for (file in files) {
+                        if (file.isFile && file.lastModified() < System.currentTimeMillis() - 3600000) {
+                            file.delete()
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to cleanup temp dir: ${e.message}")
+            }
             
             progressThread.interrupt()
             

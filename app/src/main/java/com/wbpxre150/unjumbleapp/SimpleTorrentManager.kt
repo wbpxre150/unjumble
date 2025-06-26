@@ -63,6 +63,34 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
     // Resume data is saved periodically during progress monitoring in startProgressMonitoring()
     
     /**
+     * Create and manage temp directory for fetchMagnet operations (jlibtorrent 2.0 requirement)
+     */
+    private fun createMagnetTempDir(): File {
+        val tempDir = File(context.cacheDir, "magnet_temp")
+        if (!tempDir.exists()) {
+            tempDir.mkdirs()
+        }
+        return tempDir
+    }
+    
+    /**
+     * Clean up temp directory after fetchMagnet operations
+     */
+    private fun cleanupMagnetTempDir(tempDir: File) {
+        try {
+            if (tempDir.exists() && tempDir.isDirectory) {
+                tempDir.listFiles()?.forEach { file ->
+                    if (file.isFile && file.lastModified() < System.currentTimeMillis() - 3600000) { // Older than 1 hour
+                        file.delete()
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to cleanup magnet temp dir: ${e.message}")
+        }
+    }
+    
+    /**
      * Start periodic maintenance (FrostWire pattern)
      */
     private fun startMaintenanceTimer() {
@@ -87,7 +115,7 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
         
         try {
             // Load native library (same as FrostWire approach)
-            System.loadLibrary("jlibtorrent-1.2.19.0")
+            System.loadLibrary("jlibtorrent-2.0.11.0")
             Log.d(TAG, "✓ Native library loaded")
             
             // Try to load previous session state (FrostWire pattern)
@@ -130,7 +158,7 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
         val settings = SettingsPack()
         
         // Enhanced DHT configuration with IPv6 support
-        settings.enableDht(true)
+        settings.setEnableDht(true)
         settings.setString(
             settings_pack.string_types.dht_bootstrap_nodes.swigValue(),
             "dht.libtorrent.org:25401,router.bittorrent.com:6881,router.utorrent.com:6881,dht.transmissionbt.com:6881,router.silotis.us:6881"
@@ -263,7 +291,8 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
         val defaultSendBufferWatermark = 500 * 1024 // 500KB default
         settings.setInteger(settings_pack.int_types.send_buffer_watermark.swigValue(), defaultSendBufferWatermark / 2)
         
-        settings.setInteger(settings_pack.int_types.cache_size.swigValue(), 256)
+        // Cache size setting - disabled temporarily due to jlibtorrent 2.0 API changes
+        // settings.setInteger(settings_pack.int_types.cache_size.swigValue(), 256)
         settings.setInteger(settings_pack.int_types.max_peerlist_size.swigValue(), 200)
         settings.setInteger(settings_pack.int_types.tick_interval.swigValue(), 1000)
         settings.setInteger(settings_pack.int_types.inactivity_timeout.swigValue(), 60)
@@ -337,7 +366,9 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
                         Log.d(TAG, "🚀 Restoring torrent: $infoHashStr (${resumeData.size} bytes resume data)")
                         
                         // Fetch metadata to get TorrentInfo
-                        val metadata = fetchMagnet(magnetLink, 30, false) // Shorter timeout for restoration
+                        val tempDir = createMagnetTempDir()
+                        val metadata = fetchMagnet(magnetLink, 30, tempDir) // Shorter timeout for restoration
+                        cleanupMagnetTempDir(tempDir)
                         
                         if (metadata != null && metadata.isNotEmpty()) {
                             val torrentInfo = TorrentInfo.bdecode(metadata)
@@ -1080,7 +1111,9 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
                 
                 try {
                     // Use the enhanced fetchMagnet method that already exists
-                    val metadata = fetchMagnet(magnetLink, 120, false)
+                    val tempDir = createMagnetTempDir()
+                    val metadata = fetchMagnet(magnetLink, 120, tempDir)
+                    cleanupMagnetTempDir(tempDir)
                     
                     if (metadata != null) {
                         Log.d(TAG, "✅ Metadata fetched for seeding, configuring torrent...")
@@ -1420,7 +1453,9 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
             
             // Fallback to standard FrostWire approach
             Log.d(TAG, "Falling back to standard metadata fetch")
-            val metadata = fetchMagnet(magnetLink, METADATA_TIMEOUT_SECONDS, false)
+            val tempDir = createMagnetTempDir()
+            val metadata = fetchMagnet(magnetLink, METADATA_TIMEOUT_SECONDS, tempDir)
+            cleanupMagnetTempDir(tempDir)
             
             val duration = System.currentTimeMillis() - startTime
             if (metadata != null) {
@@ -1448,7 +1483,10 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
             futures.add(executor.submit<ByteArray?> {
                 try {
                     Log.d(TAG, "Parallel strategy 1: DHT-optimized fetch")
-                    fetchMagnet(magnetLink, 45, false) // 45 second timeout for DHT
+                    val tempDir = createMagnetTempDir()
+                    val result = fetchMagnet(magnetLink, 45, tempDir) // 45 second timeout for DHT
+                    cleanupMagnetTempDir(tempDir)
+                    return@submit result
                 } catch (e: Exception) {
                     Log.d(TAG, "DHT-optimized fetch failed: ${e.message}")
                     null
@@ -1461,7 +1499,10 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
                     try {
                         Log.d(TAG, "Parallel strategy 2: Tracker-optimized fetch")
                         Thread.sleep(5000) // Give DHT a head start
-                        fetchMagnet(magnetLink, 60, true) // Enable tracker prioritization
+                        val tempDir = createMagnetTempDir()
+                        val result = fetchMagnet(magnetLink, 60, tempDir) // Enable tracker prioritization
+                        cleanupMagnetTempDir(tempDir)
+                        return@submit result
                     } catch (e: Exception) {
                         Log.d(TAG, "Tracker-optimized fetch failed: ${e.message}")
                         null
@@ -1474,7 +1515,10 @@ class SimpleTorrentManager private constructor(private val context: Context) : S
                 try {
                     Log.d(TAG, "Parallel strategy 3: Standard fetch")
                     Thread.sleep(10000) // Give other strategies time
-                    fetchMagnet(magnetLink, METADATA_TIMEOUT_SECONDS, false)
+                    val tempDir = createMagnetTempDir()
+                    val result = fetchMagnet(magnetLink, METADATA_TIMEOUT_SECONDS, tempDir)
+                    cleanupMagnetTempDir(tempDir)
+                    return@submit result
                 } catch (e: Exception) {
                     Log.d(TAG, "Standard fetch failed: ${e.message}")
                     null
